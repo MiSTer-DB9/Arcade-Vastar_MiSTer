@@ -334,7 +334,21 @@ assign cfg_write = 0;
 assign cfg_address = 0;
 assign cfg_data = 0;
 
-wire reset = RESET | status[0] | buttons[1] | ioctl_download;
+// Planet Probe cold-boot fix (2026-05-31): the Z80 was fetching its reset vector before
+// program ROM/RAM/clocks were fully settled -> ran init on a not-all-there state -> garbage
+// RAM ("99 credits", unworkable). A manual soft reset always cured it; ioctl_download + ~locked
+// released the auto reset too early. Hold the core in reset for a margin (~0.34s) AFTER both
+// ioctl_download finishes AND the PLL locks. Counted on CLK_50M (alive regardless of PLL lock).
+// Over-holding reset at boot is harmless; if it's still short, widen the counter bit.
+reg [24:0] boot_rst_cnt = 25'd0;
+wire       boot_settled = locked & ~ioctl_download;
+always @(posedge CLK_50M) begin
+	if (!boot_settled)          boot_rst_cnt <= 25'd0;              // restart wait if download/lock drops
+	else if (~boot_rst_cnt[24]) boot_rst_cnt <= boot_rst_cnt + 1'b1;
+end
+wire boot_hold = ~boot_rst_cnt[24];   // 1 until the post-settle margin elapses (~0.34s @50MHz)
+
+wire reset = RESET | status[0] | buttons[1] | ioctl_download | ~locked | boot_hold;
 
 ///////////////////         Keyboard           //////////////////
 

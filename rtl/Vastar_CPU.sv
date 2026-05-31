@@ -823,8 +823,8 @@ always_ff @(posedge clk_49m) begin
 					// bit order (erow/bx) for Planet Probe only; rot_flip=0 for Vastar so no-op there.
 					// spr_flipy <= spr_code_raw[0] ^ rot_flip;
 					// spr_flipx <= spr_code_raw[1] ^ rot_flip;
-					spr_flipy <= spr_code_raw[0];   // DIAG: drop ^rot_flip → PP reads bits in Vastar's order
-					spr_flipx <= spr_code_raw[1];   // DIAG: drop ^rot_flip
+					spr_flipy <= spr_code_raw[0] ^ rot_flip;   // DIAG: Y KEEPS ^rot_flip (was upside-down without it)
+					spr_flipx <= spr_code_raw[1];   // DIAG: X drops ^rot_flip (confirmed correct without it)
 					spr_dbl <= spr_attr_raw[3];
 				end
 				spr_state <= 6;
