@@ -348,7 +348,40 @@ always @(posedge CLK_50M) begin
 end
 wire boot_hold = ~boot_rst_cnt[24];   // 1 until the post-settle margin elapses (~0.34s @50MHz)
 
-wire reset = RESET | status[0] | buttons[1] | ioctl_download | ~locked | boot_hold;
+// DIAG-REVERT-2026-05-31: one-time auto re-kick for the PP cold-boot RAM-test lockup.
+// The game's power-on RAM test ($7E53) fails ~50% from cold-zero RAM and hard-locks, but a
+// reset ALWAYS cures it (RAM-persistence — proven, see pprobe disasm). So after the first boot
+// has run (~1.3s, past the game's own delay + RAM test), assert reset once more, then latch off
+// — an automatic version of the manual soft reset that works 100%.
+// boot_settled (= locked & ~ioctl_download) is defined in the boot_rst_cnt block above.
+reg [27:0] rk_cnt  = 28'd0;
+reg        rk_done = 1'b0;
+// Tunable timing (CLK_50M, so value = seconds * 50e6):
+localparam [27:0] KICK_AT  = 28'd100000000;  // ~2.0s after settle: first-boot window -> RAISE for a longer delay
+localparam [27:0] KICK_END = 28'd133000000;  // ~2.66s: end of the reset kick, then latch off forever
+always @(posedge CLK_50M) begin
+	if (!boot_settled) rk_cnt <= 28'd0;
+	else if (!rk_done) begin
+		rk_cnt <= rk_cnt + 1'b1;
+		if (rk_cnt >= KICK_END) rk_done <= 1'b1;   // latch -> never kick again
+	end
+end
+wire rekick = boot_settled & ~rk_done & (rk_cnt >= KICK_AT);   // reset asserted KICK_AT..KICK_END after settle
+
+wire reset = RESET | status[0] | buttons[1] | ioctl_download | ~locked | boot_hold | rekick;
+
+// DIAG-REVERT-2026-05-31: async-assert / sync-deassert reset synchronizer. Raw `reset` above
+// is a combinational OR of async terms (HPS reset/download, PLL ~locked) + the CLK_50M boot_hold
+// counter, fed to CPUs running on CLK_49M. Releasing it unsynchronized = the CPU catches the
+// deassert at a random CLK_49M phase each boot -> PP intermittently boots "really wrong".
+// Register the release onto CLK_49M for a clean, deterministic edge.
+// Revert: feed the core `.reset(~reset)` instead of `.reset(~reset_sync)` and delete this block.
+reg [1:0] rst_sync = 2'b11;
+always @(posedge CLK_49M or posedge reset) begin
+	if (reset) rst_sync <= 2'b11;
+	else       rst_sync <= {rst_sync[0], 1'b0};
+end
+wire reset_sync = rst_sync[1];
 
 ///////////////////         Keyboard           //////////////////
 
@@ -498,7 +531,7 @@ wire [7:0] sys_controls = {2'b00, btn_service, m_start2, m_start1, 1'b0, m_coin2
 // Instantiate Vastar top-level module
 Vastar vastar_inst
 (
-	.reset(~reset),
+	.reset(~reset_sync),
 
 	.clk_49m(CLK_49M),
 
