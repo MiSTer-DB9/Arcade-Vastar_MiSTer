@@ -342,8 +342,8 @@ wire [15:0] joystick_0_USB, joystick_1_USB;
 wire [15:0] joy = joystick_0 | joystick_1;
 
 // [MiSTer-DB9-Pro BEGIN] - DB controllers muted while OSD is open
-wire [31:0] joystick_0 = joydb_1ena ? (OSD_STATUS ? 32'b0 : {joydb_1[11],joydb_1[9],joydb_1[10],joydb_1[5:0]}) : joystick_0_USB;
-wire [31:0] joystick_1 = joydb_2ena ? (OSD_STATUS ? 32'b0 : {joydb_2[11],joydb_2[10],joydb_2[9],joydb_2[5:0]}) : joydb_1ena ? joystick_0_USB : joystick_1_USB;
+wire [31:0] joystick_0 = joydb_1ena ? (OSD_STATUS ? 32'b0 : joydb_1_mapped[8:0]) : joystick_0_USB;
+wire [31:0] joystick_1 = joydb_2ena ? (OSD_STATUS ? 32'b0 : joydb_2_mapped[8:0]) : joydb_1ena ? joystick_0_USB : joystick_1_USB;
 // [MiSTer-DB9-Pro END]
 
 wire [21:0] gamma_bus;
