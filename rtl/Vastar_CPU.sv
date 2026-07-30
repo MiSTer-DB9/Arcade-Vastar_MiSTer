@@ -1,12 +1,13 @@
 //============================================================================
 //
-//  Vastar CPU board — Phase 2: Full Video Rendering
+//  Vastar CPU board — dual Z80 system, video rendering, and sound
 //  Copyright (C) 2026 Rodimus
 //
 //  MAME reference: vastar.cpp, vastar_viddev.cpp
 //  Hardware: Z80 CPU1 + Z80 CPU2 @ 3.072 MHz (XTAL 18.432 / 6)
 //            AY-3-8910 @ 1.536 MHz (18.432 / 12)
-//  Screen: 256x256 total, visible 256x224 (lines 16-239), 60.58 Hz
+//  Screen: 288x264 total, visible 256x224 (lines 17-240), ~60.6 Hz
+//          (pixel clock 4.608 MHz = 18.432 XTAL / 4)
 //
 //============================================================================
 
@@ -52,8 +53,8 @@ always_ff @(posedge clk_49m) cpu_div <= cpu_div + 4'd1;
 wire cen_cpu = (cpu_div == 4'd0);
 
 reg ay_toggle = 1'b0;
-always_ff @(posedge clk_49m) if (cen_cpu) ay_toggle <= ~ay_toggle;  // Verify cen_cpu for AY toggle
-wire cen_ay = cen_cpu & ~ay_toggle & ~pause;
+always_ff @(posedge clk_49m) if (cen_cpu) ay_toggle <= ~ay_toggle;  // divide cen_cpu by 2
+wire cen_ay = cen_cpu & ~ay_toggle & ~pause;  // AY clock enable: cen_cpu / 2 = 1.536 MHz
 
 //-------------------------------------------------------- Video timing --------------------------------------------------------//
 
@@ -63,7 +64,8 @@ reg [8:0] v_cnt      = 9'd0;
 wire [8:0] h_cnt_rot;
 wire [8:0] v_cnt_rot;
 
-// XOR-based flip
+// Mirror the raster by XORing the low bits of the counters with flip_screen
+// (cheaper than a subtractor); the MSB (frame/line parity) is passed through.
 assign h_cnt_rot = { base_h_cnt[8], base_h_cnt[7:0] ^ {8{flip_screen}} };
 assign v_cnt_rot = { v_cnt[8],      v_cnt[7:0]      ^ {8{flip_screen}} };
 
@@ -131,6 +133,15 @@ always_ff @(posedge clk_49m) begin
 	else if (cen_cpu && cs_mainlatch) mainlatch[cpu1_A[2:0]] <= cpu1_Dout[0];
 end
 wire nmi_mask    = mainlatch[0];
+// flip_screen and rot_flip are DIFFERENT signals, not interchangeable:
+//   rot_flip    — MiSTer-side screen-rotation flag (Vastar=0, Planet Probe=1), fixed per game.
+//   flip_screen — this signal, additionally folds in the game's own flip-screen
+//                 latch bit (mainlatch[1]), which the game can change at runtime.
+// The per-sprite flipX/flipY inversion (below, in the sprite decode) is gated on
+// flip_screen, matching MAME vastar_viddev.cpp:
+//   if (m_flip_screen) { flipx = !flipx; flipy = !flipy; }
+// Using rot_flip there instead looks like a harmless simplification but is wrong
+// and will silently break Planet Probe's sprite orientation.
 wire flip_screen = rot_flip ^ mainlatch[1];
 wire cpu2_rst    = ~mainlatch[2];
 
@@ -140,10 +151,15 @@ wire [15:0] cpu2_A;
 wire [7:0]  cpu2_Dout;
 wire        cpu2_WR_n, cpu2_RD_n, cpu2_MREQ_n, cpu2_IORQ_n, cpu2_M1_n, cpu2_RFSH_n;
 
-T80pa cpu2
+T80s cpu2
 (
 	.RESET_n(reset & ~cpu2_rst), .CLK(clk_49m),
-	.CEN_p(cen_cpu & ~pause), .CEN_n(~cen_cpu & ~pause),
+	// Both Z80s are identical 3.072 MHz parts on the real board, so they must share one timing model:
+	// the boot handshake depends on their RELATIVE speed. A different T80 wrapper here makes the sub
+	// lose that race against the main's power-on self-test, which then reports a sub/RAM check
+	// failure on a cold boot while a soft reset (which leaves the sub's answer already in RAM)
+	// appears to "fix" it. Keep this identical to cpu1.
+	.CEN(cen_cpu & ~pause),
 	.WAIT_n(1'b1),
 	.INT_n(~cpu2_irq), .NMI_n(1'b1),
 	.M1_n(cpu2_M1_n), .MREQ_n(cpu2_MREQ_n), .IORQ_n(cpu2_IORQ_n),
@@ -249,12 +265,9 @@ jt49_bus ay (
 	.sound(ay_sound), .sample(), .A(), .B(), .C(),
 	.IOA_in(dip_sw[7:0]), .IOB_in(dip_sw[15:8]), .IOA_out(), .IOB_out()
 );
-// assign sound = {ay_sound[9], ay_sound, 5'd0};
-
-// jt49 sound is UNSIGNED 10-bit (see jt49.v line 34). Previous code
-// sign-extended the MSB which caused mid-scale wrap (ay_sound >= 512
-// flipped to large negative) — audible as buzzing/static on loud notes.
-// Pad a 0 MSB and upshift into the signed 16-bit frame instead.
+// jt49 sound output is UNSIGNED 10-bit (see jt49.v). Zero-extend it into the
+// signed 16-bit output frame: sign-extending the MSB instead wraps at
+// mid-scale (ay_sound >= 512) and produces audible buzzing/static on loud notes.
 assign sound = {1'b0, ay_sound, 5'd0};
 
 wire [7:0] cpu2_Din = (~cpu2_IORQ_n) ? (cs2_ay_rd ? ay_dout : 8'hFF) :
@@ -347,15 +360,16 @@ reg [7:0] r_byte_a, r_byte_b;
 reg [7:0] r_scroll;
 reg [2:0] r_layer; // 0=fg, 1=bg0, 2=bg1
 
-// Which line we're rendering into buffers.
-// H4 (2026-05-15) moved the page-flip to end-of-line, so display at v_cnt=N reads
-// the buffer that was rendered AT v_cnt=N-1. The +1 in rnext used to compensate
-// for OLD code's mid-visible flip race; with the flip now in hblank that +1 is
-// off-by-one and shifts the displayed content up by 1 line (FPGA-top = MAME-right
-// after 90° CW rotation = the 1px garbage strip user reported).
-// Vault note H1 attempted this same change pre-H4 and it broke things — that
-// was the race interaction, not this formula. Grok's diagnosis was correct;
-// it just needed H4 to be in place first.
+// Line being rendered into the buffers: one line ahead of the line currently on
+// screen (see the double-buffer page-flip, below). rline = 255 - rnext supplies
+// the vertical mirror for the ENTIRE render, so individual tiles need no
+// per-tile vertical flip beyond their own flipY bit.
+//
+// This line, the double-buffered line buffers, and the end-of-hblank page flip
+// (base_h_cnt == 287, in its own always_ff below) form a COUPLED TRIPLE that
+// eliminates line tearing. All three must move together: rnext must equal
+// v_cnt_rot with no +1, and the page flip must happen at end-of-hblank, not
+// mid-visible. Changing any one alone reintroduces a torn/duplicated line.
 wire [8:0] rnext     = v_cnt_rot;
 wire [7:0] rline     = (8'd255 - rnext[7:0]);
 
@@ -819,12 +833,10 @@ always_ff @(posedge clk_49m) begin
 					tilebase = (spr_idx < 8) ? 8'd128 : 8'd0; // 0x80/2=64 for bank0, 0 for bank1
 					code = {spr_attr_raw[0], spr_code_raw[7:2]} + tilebase;
 					spr_code <= code;
-					// DIAG-REVERT-2026-05-31: PP sprites inside-out — ^rot_flip inverts within-sprite
-					// bit order (erow/bx) for Planet Probe only; rot_flip=0 for Vastar so no-op there.
-					// spr_flipy <= spr_code_raw[0] ^ rot_flip;
-					// spr_flipx <= spr_code_raw[1] ^ rot_flip;
-					spr_flipy <= spr_code_raw[0] ^ rot_flip;   // DIAG: Y KEEPS ^rot_flip (was upside-down without it)
-					spr_flipx <= spr_code_raw[1];   // DIAG: X drops ^rot_flip (confirmed correct without it)
+					// Per-sprite flip bits are inverted when the board is flipped, gated on
+					// flip_screen (see the flip_screen declaration above — NOT rot_flip).
+					spr_flipy <= spr_code_raw[0] ^ flip_screen;
+					spr_flipx <= spr_code_raw[1] ^ flip_screen;
 					spr_dbl <= spr_attr_raw[3];
 				end
 				spr_state <= 6;
@@ -852,13 +864,15 @@ always_ff @(posedge clk_49m) begin
 			end
 			5'd7: begin
 				// Set sprite ROM address for current row, left half (byte_a)
-				// 16x16 sprite layout (64 bytes/sprite):
+				// 16x16 sprite layout (64 bytes/sprite, 4 column-groups x 8 rows x 2 row-blocks):
 				// row 0-7:  base + row                 (byte_a for cols 0-3)
 				//           base + row + 8             (byte_b for cols 4-7)
 				//           base + row + 16            (cols 8-11)
 				//           base + row + 24            (cols 12-15)
-				// row 8-15: base + 32 + (row-8)        etc.
-				// For double height: code/2, 128 bytes
+				// row 8-15: base + 32 + (row-8)        etc. (second row-block, offset +32)
+				// Each byte packs 4 pixels x 2 bitplanes (see pix2bpp / the {byte_a[bx+4],byte_a[bx]}
+				// decode below): bitplane 0 in bits [3:0], bitplane 1 in bits [7:4].
+				// Double-height variant: code/2, 128 bytes/sprite (row_base folds in the extra bit).
 				begin
 					reg [13:0] base;
 					reg [4:0] erow;
@@ -868,7 +882,15 @@ always_ff @(posedge clk_49m) begin
 						base = {spr_code[7:1], 7'd0}; // code/2 * 128
 					else
 						base = {spr_code, 6'd0}; // code * 64
-					quarter = spr_col[3:2]; // which quarter (0-3)
+					// quarter (which 4-pixel group, 0-3) must be reversed together with bx
+					// (below) whenever flipx is set. Reversing only bx mirrors pixels within
+					// each 4-pixel group but leaves the groups themselves in source order —
+					// a 4-pixel-granular scramble that is only visible on sprites that actually
+					// set flipx (diagonals reusing one tile via the flip bits; cardinal-direction
+					// sprites use their own tiles with the bit clear). flipy needs no equivalent
+					// fixup: erow = 15-spr_row already reverses erow[3] (which 8-row block) and
+					// erow[2:0] together in one step.
+					quarter = spr_flipx ? (2'd3 - spr_col[3:2]) : spr_col[3:2];
 					// Byte offset within sprite: row_base + quarter*8
 					// row_base = (erow < 8) ? erow : 32 + (erow-8)  for 16x16
 					// For 32 tall: (erow < 8) ? erow : (erow < 16) ? 32+(erow-8) : (erow < 24) ? 64+(erow-16) : 96+(erow-24)
@@ -900,7 +922,15 @@ always_ff @(posedge clk_49m) begin
 					reg [7:0] xpos;
 					bx = spr_flipx ? spr_col[1:0] : (3'd3 - spr_col[1:0]);
 					pval = {spr_byte_a[bx + 4], spr_byte_a[bx]};
-					xpos = rot_flip	? (8'd255 - (spr_x + {4'd0, spr_col})): (spr_x + {4'd0, spr_col});
+					// Sprite mirroring is deliberately split into two independent jobs:
+					// xpos here mirrors only the sprite's ORIGIN (placement on screen), while
+					// spr_flipx/spr_flipy (decoded above) handle internal pixel order. Combining
+					// both into a single `255 - (origin + index)` expression is wrong: that form
+					// mirrors placement AND reverses internal order in one step and the two can
+					// no longer be adjusted independently. Sprite width is always 16 (spr_col
+					// wraps at 15 even when spr_dbl doubles the height), so mirroring source cols
+					// spr_x..spr_x+15 gives mirrored span (240-spr_x)..(255-spr_x) — hence the 240.
+					xpos = rot_flip ? ((8'd240 - spr_x) + {4'd0, spr_col}) : (spr_x + {4'd0, spr_col});
 					if (lb_page) begin
 						if (pval != 2'd0 && spr_lb_1[xpos] == 8'd0)
 							spr_lb_1[xpos] <= {spr_color, pval};
@@ -941,6 +971,8 @@ end
 // Double-buffer page flip — fires at end-of-line (base_h_cnt==287, fully in hblank),
 // only on lines that had a render. Render completes ~halfway through the line,
 // so it's guaranteed done well before this point. Sole driver of lb_page.
+// Part of the tear-fix coupled triple documented at rnext/rline above — do not
+// move this flip earlier (e.g. mid-visible) without also revisiting that note.
 always_ff @(posedge clk_49m) begin
 	if (!reset) begin
 		lb_page <= 1'b0;
