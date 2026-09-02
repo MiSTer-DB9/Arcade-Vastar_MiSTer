@@ -7,7 +7,7 @@
 //  Hardware: Z80 CPU1 + Z80 CPU2 @ 3.072 MHz (XTAL 18.432 / 6)
 //            AY-3-8910 @ 1.536 MHz (18.432 / 12)
 //  Screen: 288x264 total, visible 256x224 (lines 17-240), ~60.6 Hz
-//          (pixel clock 4.608 MHz = 18.432 XTAL / 4)
+//          (pixel clock 6.144 MHz = 18.432 XTAL / 3, htotal 384)
 //
 //============================================================================
 
@@ -24,6 +24,7 @@ module Vastar_CPU
 	input   [7:0] sys_controls,
 	input  [15:0] dip_sw,
     input         rot_flip,
+	input         crt_flip,      // OSD 180 degree flip
 	output signed [15:0] sound,
 	input   [3:0] h_center, v_center,
 	input         main_rom_cs_i, sub_rom_cs_i, fgtile_cs_i,
@@ -42,9 +43,12 @@ module Vastar_CPU
 
 //------------------------------------------------------- Clock enables -------------------------------------------------------//
 
-// Pixel clock: 49.152 MHz * 3/32 = 4.608 MHz exactly (= 18.432 XTAL / 4)
+// Pixel clock 49.152 MHz * 4/32 = 6.144 MHz exactly (= 18.432 XTAL / 3).
+// htotal 384 -> 60.61 Hz / 16.0 kHz with 15 kHz-safe porches. The dot clock, the
+// htotal wrap, the hsync window and the double-buffer page flip are coupled and
+// must move together.
 wire [1:0] pix_cen_o;
-jtframe_frac_cen #(2) pix_cen (.clk(clk_49m), .n(10'd3), .m(10'd32), .cen(pix_cen_o), .cenb());
+jtframe_frac_cen #(2) pix_cen (.clk(clk_49m), .n(10'd4), .m(10'd32), .cen(pix_cen_o), .cenb());
 wire cen_pix = pix_cen_o[0];
 assign ce_pix = cen_pix;
 
@@ -71,7 +75,7 @@ assign v_cnt_rot = { v_cnt[8],      v_cnt[7:0]      ^ {8{flip_screen}} };
 
 always_ff @(posedge clk_49m) begin
 	if (cen_pix) begin
-		if (base_h_cnt == 9'd287) begin
+		if (base_h_cnt == 9'd383) begin
 			base_h_cnt <= 9'd0;
 			v_cnt <= (v_cnt == 9'd263) ? 9'd0 : v_cnt + 9'd1;
 		end else begin
@@ -85,9 +89,15 @@ wire vblk = (v_cnt < 9'd17) | (v_cnt >= 9'd241);
 assign video_hblank = hblk;
 assign video_vblank = vblk;
 
-wire [8:0] hs_start = 9'd264 + {5'd0, h_center};
+// Sync geometry matches Gyrodine (Kyugo) pixel-for-pixel, which is field-proven
+// on a 15 kHz tube: active 0-255, front porch 24 px, sync 16 px, back porch 88 px.
+// h_center / v_center are 4-bit two's complement (0, +1..+7, -8..-1) and are
+// sign-extended so the image shifts both ways; the CONF_STR labels match.
+// vs_start base is 249 rather than 248 so the full -8 setting still lands inside
+// vblank (v_cnt 241..263).
+wire [8:0] hs_start = 9'd280 + {{5{h_center[3]}}, h_center};
 wire [8:0] hs_end   = hs_start + 9'd16;
-wire [8:0] vs_start = 9'd248 + {5'd0, v_center};
+wire [8:0] vs_start = 9'd249 + {{5{v_center[3]}}, v_center};
 wire [8:0] vs_end   = vs_start + 9'd4;
 assign video_hsync = (h_cnt_rot >= hs_start && h_cnt_rot < hs_end);
 assign video_vsync = (v_cnt_rot >= vs_start && v_cnt_rot < vs_end);
@@ -133,8 +143,10 @@ always_ff @(posedge clk_49m) begin
 	else if (cen_cpu && cs_mainlatch) mainlatch[cpu1_A[2:0]] <= cpu1_Dout[0];
 end
 wire nmi_mask    = mainlatch[0];
-// flip_screen and rot_flip are DIFFERENT signals, not interchangeable:
+// flip_screen, rot_flip and crt_flip are DIFFERENT signals, not interchangeable:
 //   rot_flip    — MiSTer-side screen-rotation flag (Vastar=0, Planet Probe=1), fixed per game.
+//   crt_flip    — OSD 180 degree flip. Belongs HERE and nowhere else; in particular
+//                 not in rotate_ccw, which selects the 90 degree rotation direction.
 //   flip_screen — this signal, additionally folds in the game's own flip-screen
 //                 latch bit (mainlatch[1]), which the game can change at runtime.
 // The per-sprite flipX/flipY inversion (below, in the sprite decode) is gated on
@@ -142,7 +154,7 @@ wire nmi_mask    = mainlatch[0];
 //   if (m_flip_screen) { flipx = !flipx; flipy = !flipy; }
 // Using rot_flip there instead looks like a harmless simplification but is wrong
 // and will silently break Planet Probe's sprite orientation.
-wire flip_screen = rot_flip ^ mainlatch[1];
+wire flip_screen = rot_flip ^ mainlatch[1] ^ crt_flip;
 wire cpu2_rst    = ~mainlatch[2];
 
 //------------------------------------------------------- CPU2 — Sub ----------------------------------------------------------//
@@ -366,7 +378,7 @@ reg [2:0] r_layer; // 0=fg, 1=bg0, 2=bg1
 // per-tile vertical flip beyond their own flipY bit.
 //
 // This line, the double-buffered line buffers, and the end-of-hblank page flip
-// (base_h_cnt == 287, in its own always_ff below) form a COUPLED TRIPLE that
+// (base_h_cnt == 383, in its own always_ff below) form a COUPLED TRIPLE that
 // eliminates line tearing. All three must move together: rnext must equal
 // v_cnt_rot with no +1, and the page flip must happen at end-of-hblank, not
 // mid-visible. Changing any one alone reintroduces a torn/duplicated line.
@@ -419,8 +431,8 @@ always_ff @(posedge clk_49m) begin
 	end else if (rstate == S_IDLE) begin
 		wait_cycle <= 0;
 		// Trigger render at start of line (base_h_cnt==0). Render takes ~156 cen_pix
-		// ticks out of 288 available, so it always completes well before end-of-line.
-		// Page flip is handled separately at base_h_cnt==287 (see below).
+		// ticks out of 384 available, so it always completes well before end-of-line.
+		// Page flip is handled separately at base_h_cnt==383 (see below).
 		if (cen_pix && base_h_cnt == 9'd0 && v_cnt_rot >= 9'd15 && v_cnt_rot < 9'd241) begin
 			rx <= 0;
 			rstate <= S_FG_CODE;
@@ -968,7 +980,7 @@ always_ff @(posedge clk_49m) begin
 	end
 end
 
-// Double-buffer page flip — fires at end-of-line (base_h_cnt==287, fully in hblank),
+// Double-buffer page flip — fires at end-of-line (base_h_cnt==383, fully in hblank),
 // only on lines that had a render. Render completes ~halfway through the line,
 // so it's guaranteed done well before this point. Sole driver of lb_page.
 // Part of the tear-fix coupled triple documented at rnext/rline above — do not
@@ -976,7 +988,7 @@ end
 always_ff @(posedge clk_49m) begin
 	if (!reset) begin
 		lb_page <= 1'b0;
-	end else if (cen_pix && base_h_cnt == 9'd287 && v_cnt_rot >= 9'd15 && v_cnt_rot < 9'd241) begin
+	end else if (cen_pix && base_h_cnt == 9'd383 && v_cnt_rot >= 9'd15 && v_cnt_rot < 9'd241) begin
 		lb_page <= ~lb_page;
 	end
 end

@@ -39,7 +39,7 @@ module emu
 	input         RESET,
 
 	//Must be passed to hps_io module
-	inout  [48:0] HPS_BUS,
+	inout  [45:0] HPS_BUS,
 
 	//Base video clock. Usually equals to CLK_SYS.
 	output        CLK_VIDEO,
@@ -190,7 +190,6 @@ module emu
 	input         OSD_STATUS
 );
 
-
 assign ADC_BUS  = 'Z;
 // [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: USER_PP driven by wrapper; USER_OUT driven by joydb (USER_OUT_DRIVE) below
 assign USER_PP = USER_PP_DRIVE;
@@ -296,21 +295,24 @@ assign VIDEO_ARY = status[12] ? ((!ar) ? 12'd3 : 12'd0) : ((!ar) ? 12'd4 : 12'd0
 `include "build_id.v"
 localparam CONF_STR = {
 	"VASTAR;;",
-	"ODE,Aspect Ratio,Original,Full screen,[ARC1],[ARC2];",
-	"OC,Orientation,Vert,Horz;",
-    "OB,Flip Vertical,Off,On;",
-	"OFH,Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
+	"P1,Video Options;",
+	"P1ODE,Aspect Ratio,Original,Full screen,[ARC1],[ARC2];",
+	"P1OC,Orientation,Vert,Horz;",
+	"P1OB,HDMI Flip,Off,On;",
+	// CRT Flip disabled: toggling it has no effect on this core.
+	// "P1OM,CRT Flip,Off,On;",
+	"P1OFH,Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
 	"-;",
 	"H1OR,Autosave Hiscores,Off,On;",
-	"P1,Pause Options;",
-	"P1OP,Pause when OSD is open,On,Off;",
-	"P1OQ,Dim video after 10s,On,Off;",
+	"P2,Pause Options;",
+	"P2OP,Pause when OSD is open,On,Off;",
+	"P2OQ,Dim video after 10s,On,Off;",
 	"-;",
 	"DIP;",
 	"-;",
-	"P2,Screen Centering;",
-	"P2O36,H Center,0,-1,-2,-3,-4,-5,-6,-7,+7,+6,+5,+4,+3,+2,+1;",
-	"P2O7A,V Center,0,-1,-2,-3,-4,-5,-6,-7,-8,-9,-10,-11,-12;",
+	"P3,Screen Centering;",
+	"P3O36,H Center,0,+1,+2,+3,+4,+5,+6,+7,-8,-7,-6,-5,-4,-3,-2,-1;",
+	"P3O7A,V Center,0,+1,+2,+3,+4,+5,+6,+7,-8,-7,-6,-5,-4,-3,-2,-1;",
 	"-;",
 	// [MiSTer-DB9-Pro BEGIN] - Saturn-first joy_type (canonical bit notation)
 	"O[127:126],UserIO Joystick,Off,Saturn,DB9MD,DB15;",
@@ -604,6 +606,7 @@ Vastar vastar_inst
 	.dip_sw({dip_sw[1], dip_sw[0]}),
 
     .rot_flip(rot_flip),
+	.crt_flip(status[22]),
 
 	.h_center(status[6:3]),
 	.v_center(status[10:7]),
