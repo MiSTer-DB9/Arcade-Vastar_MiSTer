@@ -298,8 +298,13 @@ assign USER_OUT = USER_OUT_DRIVE;
 
 wire [1:0] ar = status[14:13];
 
-assign VIDEO_ARX = status[12] ? ((!ar) ? 12'd4 : (ar - 1'd1)) : ((!ar) ? 12'd3 : (ar - 1'd1));
-assign VIDEO_ARY = status[12] ? ((!ar) ? 12'd3 : 12'd0) : ((!ar) ? 12'd4 : 12'd0);
+// MRA index 1: core_config (byte 0) and the Zodiack-board input map (bytes 1-24), see the loader below
+reg [7:0] core_config = 8'd0;
+reg [4:0] in_map[24];
+wire horz = core_config[4];         // horizontal game shown rotated 180 (The Bounty): no 90 degree rotation, 4:3
+
+assign VIDEO_ARX = (status[12] | horz) ? ((!ar) ? 12'd4 : (ar - 1'd1)) : ((!ar) ? 12'd3 : (ar - 1'd1));
+assign VIDEO_ARY = (status[12] | horz) ? ((!ar) ? 12'd3 : 12'd0) : ((!ar) ? 12'd4 : 12'd0);
 
 `include "build_id.v"
 localparam CONF_STR = {
@@ -308,8 +313,7 @@ localparam CONF_STR = {
 	"P1ODE,Aspect Ratio,Original,Full screen,[ARC1],[ARC2];",
 	"P1OC,Orientation,Vert,Horz;",
 	"P1OB,HDMI Flip,Off,On;",
-	// CRT Flip disabled: toggling it has no effect on this core.
-	// "P1OM,CRT Flip,Off,On;",
+	"P1OM,CRT Flip,Off,On;",
 	"P1OFH,Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
 	"-;",
 	"H1OR,Autosave Hiscores,Off,On;",
@@ -520,6 +524,26 @@ wire m_coin1    = btn_coin1    | joystick_0[8];
 wire m_coin2    = btn_coin2;
 wire m_pause    = btn_pause    | joystick_0[9];
 
+// Zodiack board inputs (active high): each IN0 / IN1 bit takes the control the MRA input map names (0 = none).
+// Directions are game-space, MiSTer bits 0 R / 1 L / 2 D / 3 U, as MAME's ports define them.
+wire [31:0] ctl = {
+	10'd0,
+	btn_service,                                       // 21 service
+	m_start2, m_start1, m_coin2, m_coin1,              // 20-17
+	2'd0, joystick_1[5], joystick_1[4],                // 14-13 P2 buttons 2 / 1
+	joystick_1[0], joystick_1[1], joystick_1[2], joystick_1[3],   // 12 R, 11 L, 10 D, 9 U
+	2'd0, m_fire1b, m_fire1,                           // 6-5 P1 buttons 2 / 1
+	m_down1, m_up1, m_right1, m_left1,                 // 4 R, 3 L, 2 D, 1 U (m_* names are rotated, see above)
+	1'b0                                               // 0 none
+};
+wire [7:0] zin0, zin1, zin2;
+genvar zb;
+generate for (zb = 0; zb < 8; zb = zb + 1) begin : zinmap
+	assign zin0[zb] = ctl[in_map[zb]];
+	assign zin1[zb] = ctl[in_map[zb + 8]];
+	assign zin2[zb] = ctl[in_map[zb + 16]];
+end endgenerate
+
 // PAUSE SYSTEM
 wire pause_cpu;
 wire [23:0] rgb_out;
@@ -541,13 +565,24 @@ end
 
 // Variant select byte, loaded from the MRA's rom index="1" (see releases/*.mra).
 // bit0: 0 = Vastar (rotate CW), 1 = Planet Probe (rotate CCW).
-reg [7:0] core_config = 8'd0;
+// bit1: Orca OVG-40c video board instead of the Vastar one (Dog Fight prototype).
+// bit2: Zodiack CPU / audio board (Zodiack, Dog Fight). Bytes 1-16: its IN0 / IN1 input map, one control id per bit;
+//       bytes 17-24: controls ORed into DSW0 (Percussor / Bounty read button 2 there).
+// bit3: OVG-40c sprites / bullets follow the flip in Y (MAME percuss_hardware: Percussor, Mogu Chan, Bounty).
+// bit4: horizontal game, picture rotated 180 (The Bounty).
 always_ff @(posedge CLK_49M) begin
-    if (ioctl_wr && ioctl_index == 8'd1)
+    if (ioctl_wr && ioctl_index == 8'd1 && ioctl_addr == 25'd0) begin
         core_config <= ioctl_dout;
+        for (int i = 0; i < 24; i++) in_map[i] <= 5'd0;   // an MRA with a shorter map must not inherit the last game's
+    end
+    if (ioctl_wr && ioctl_index == 8'd1 && ioctl_addr >= 25'd1 && ioctl_addr <= 25'd24)
+        in_map[ioctl_addr[4:0] - 5'd1] <= ioctl_dout[4:0];
 end
 
 wire rot_flip = core_config[0];
+wire ovg      = core_config[1];
+wire zod      = core_config[2];
+wire percuss  = core_config[3];
 
 ///////////////                 Video                  ////////////////
 
@@ -574,7 +609,7 @@ wire [7:0] b = (b_out[0] ? 8'h19 : 8'h00) +
 wire ce_pix;
 
 wire rotate_ccw = rot_flip ? 0 : 1;
-wire no_rotate = status[12] | direct_video;
+wire no_rotate = status[12] | direct_video | horz;
 wire flip = ~no_rotate ^ status[11];
 wire video_rotated;
 screen_rotate screen_rotate(.*);
@@ -615,6 +650,13 @@ Vastar vastar_inst
 	.dip_sw({dip_sw[1], dip_sw[0]}),
 
     .rot_flip(rot_flip),
+	.ovg(ovg),
+	.zod(zod),
+	.zin0(zin0),
+	.zin1(zin1),
+	.zin2(zin2),
+	.percuss(percuss),
+	.horz(horz),
 	.crt_flip(status[22]),
 
 	.h_center(status[6:3]),

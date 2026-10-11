@@ -39,6 +39,12 @@ module Vastar
 	input         [15:0] dip_sw,
 
     input                rot_flip,
+	input                ovg,           // Orca OVG-40c video board (Dog Fight prototype)
+	input                zod,           // Zodiack CPU / audio board
+	input          [7:0] zin0, zin1,    // its IN0 / IN1
+	input          [7:0] zin2,          // controls ORed into its DSW0
+	input                percuss,       // OVG-40c sprites / bullets follow the flip in Y
+	input                horz,          // horizontal game rotated 180 (The Bounty)
 	input                crt_flip,      // OSD 180 degree flip
 
 	// Video outputs
@@ -73,6 +79,7 @@ wire main_rom_cs_i, sub_rom_cs_i, fgtile_cs_i;
 wire sprite0_cs_i, sprite1_cs_i;
 wire bgtile0_cs_i, bgtile1_cs_i;
 wire prom_r_cs_i, prom_g_cs_i, prom_b_cs_i, prom_unk_cs_i;
+wire ovg_gfx_cs_i, ovg_prom_cs_i;
 
 // Gate ROM loading to index 0
 wire ioctl_wr_cpu = ioctl_wr && (ioctl_index == 8'd0);
@@ -91,7 +98,9 @@ selector DLSEL
 	.prom_r_cs(prom_r_cs_i),
 	.prom_g_cs(prom_g_cs_i),
 	.prom_b_cs(prom_b_cs_i),
-	.prom_unk_cs(prom_unk_cs_i)
+	.prom_unk_cs(prom_unk_cs_i),
+	.ovg_gfx_cs(ovg_gfx_cs_i),
+	.ovg_prom_cs(ovg_prom_cs_i)
 );
 
 // Instantiate main CPU board (dual Z80 + AY)
@@ -117,6 +126,13 @@ Vastar_CPU main_pcb
 	.dip_sw(dip_sw),
 
     .rot_flip(rot_flip),
+	.ovg(ovg),
+	.zod(zod),
+	.zin0(zin0),
+	.zin1(zin1),
+	.zin2(zin2),
+	.percuss(percuss),
+	.horz(horz),
 	.crt_flip(crt_flip),
 
 	.sound(sound),
@@ -135,6 +151,8 @@ Vastar_CPU main_pcb
 	.prom_g_cs_i(prom_g_cs_i),
 	.prom_b_cs_i(prom_b_cs_i),
 	.prom_unk_cs_i(prom_unk_cs_i),
+	.ovg_gfx_cs_i(ovg_gfx_cs_i),
+	.ovg_prom_cs_i(ovg_prom_cs_i),
 	.ioctl_addr(ioctl_addr),
 	.ioctl_data(ioctl_data),
 	.ioctl_wr(ioctl_wr_cpu),
