@@ -36,6 +36,9 @@
 // 0x14200 - 0x142FF = prom_b    (tbp24s10.6m - blue PROM,  256 bytes)
 // 0x14300 - 0x143FF = prom_unk  (tbp24s10.8n - unknown,    256 bytes)
 // Total: 0x14400 = 82,944 bytes
+// Orca OVG-40c video board (Dog Fight prototype), after the Vastar regions:
+// 0x14400 - 0x173FF = ovg_gfx   ("videopcb" region as MAME lays it out, 0x3000)
+// 0x17400 - 0x1743F = ovg_prom  ("videopcb:proms", 0x40)
 
 module selector
 (
@@ -50,11 +53,13 @@ module selector
     output logic        prom_r_cs,    // 0x14000-0x140FF (256B)
     output logic        prom_g_cs,    // 0x14100-0x141FF (256B)
     output logic        prom_b_cs,    // 0x14200-0x142FF (256B)
-    output logic        prom_unk_cs   // 0x14300-0x143FF (256B)
+    output logic        prom_unk_cs,  // 0x14300-0x143FF (256B)
+    output logic        ovg_gfx_cs,   // 0x14400-0x173FF (12KB)
+    output logic        ovg_prom_cs   // 0x17400-0x1743F (64B)
 );
     always_comb begin
         {main_rom_cs, sub_rom_cs, fgtile_cs, sprite0_cs, sprite1_cs,
-         bgtile0_cs, bgtile1_cs, prom_r_cs, prom_g_cs, prom_b_cs, prom_unk_cs} = 11'd0;
+         bgtile0_cs, bgtile1_cs, prom_r_cs, prom_g_cs, prom_b_cs, prom_unk_cs, ovg_gfx_cs, ovg_prom_cs} = 13'd0;
 
         if      (ioctl_addr < 25'h08000) main_rom_cs = 1;
         else if (ioctl_addr < 25'h0A000) sub_rom_cs  = 1;
@@ -67,6 +72,8 @@ module selector
         else if (ioctl_addr < 25'h14200) prom_g_cs   = 1;
         else if (ioctl_addr < 25'h14300) prom_b_cs   = 1;
         else if (ioctl_addr < 25'h14400) prom_unk_cs = 1;
+        else if (ioctl_addr < 25'h17400) ovg_gfx_cs  = 1;
+        else if (ioctl_addr < 25'h17440) ovg_prom_cs = 1;
     end
 endmodule
 

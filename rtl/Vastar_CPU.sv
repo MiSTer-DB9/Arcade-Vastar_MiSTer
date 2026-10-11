@@ -24,6 +24,12 @@ module Vastar_CPU
 	input   [7:0] sys_controls,
 	input  [15:0] dip_sw,
     input         rot_flip,
+	input         ovg,           // Orca OVG-40c video board instead of the Vastar one (Dog Fight prototype)
+	input         zod,           // Zodiack CPU / audio board (MAME zodiack.cpp) instead of the Vastar one
+	input   [7:0] zin0, zin1,    // its IN0 / IN1 (6083 / 6084), assembled by the top level from the MRA input map
+	input   [7:0] zin2,          // controls ORed into DSW0 (6081)
+	input         percuss,       // OVG-40c sprites / bullets follow the flip in Y (MAME percuss_hardware)
+	input         horz,          // horizontal game rotated 180 (The Bounty): OVG draws like the Vastar board
 	input         crt_flip,      // OSD 180 degree flip
 	output signed [15:0] sound,
 	input   [3:0] h_center, v_center,
@@ -31,6 +37,7 @@ module Vastar_CPU
 	input         sprite0_cs_i, sprite1_cs_i,
 	input         bgtile0_cs_i, bgtile1_cs_i,
 	input         prom_r_cs_i, prom_g_cs_i, prom_b_cs_i, prom_unk_cs_i,
+	input         ovg_gfx_cs_i, ovg_prom_cs_i,
 	input  [24:0] ioctl_addr,
 	input   [7:0] ioctl_data,
 	input         ioctl_wr,
@@ -106,13 +113,14 @@ assign video_csync = ~(video_hsync ^ video_vsync);
 //------------------------------------------------------- CPU1 — Main ---------------------------------------------------------//
 
 wire [15:0] cpu1_A;
+reg         z_irq = 1'b0, z_nmi_en = 1'b0;   // Zodiack board main IRQ (held until acknowledged) / NMI enable
 wire [7:0]  cpu1_Dout;
 wire        cpu1_WR_n, cpu1_RD_n, cpu1_MREQ_n, cpu1_IORQ_n, cpu1_M1_n, cpu1_RFSH_n;
 
 T80s cpu1
 (
 	.RESET_n(reset), .CLK(clk_49m), .CEN(cen_cpu & ~pause), .WAIT_n(1'b1),
-	.INT_n(1'b1), .NMI_n(~cpu1_nmi),
+	.INT_n(~z_irq), .NMI_n(~cpu1_nmi),
 	.M1_n(cpu1_M1_n), .MREQ_n(cpu1_MREQ_n), .IORQ_n(cpu1_IORQ_n),
 	.RD_n(cpu1_RD_n), .WR_n(cpu1_WR_n), .RFSH_n(cpu1_RFSH_n),
 	.A(cpu1_A), .DI(cpu1_Din), .DO(cpu1_Dout)
@@ -122,19 +130,25 @@ reg cpu1_nmi = 1'b0;
 reg vblk_prev = 1'b0;
 always_ff @(posedge clk_49m) begin
 	if (!reset) begin cpu1_nmi <= 0; vblk_prev <= 0; end
-	else begin vblk_prev <= vblk; cpu1_nmi <= (vblk && !vblk_prev && nmi_mask); end
+	else begin vblk_prev <= vblk; cpu1_nmi <= (vblk && !vblk_prev && (zod ? z_nmi_en : nmi_mask)); end
 end
 
 //-------------------------------------------------- CPU1 Address Decoding ----------------------------------------------------//
 
 wire cpu1_mem_valid = ~cpu1_MREQ_n & cpu1_RFSH_n;
-wire cs_rom      = cpu1_mem_valid & ~cpu1_A[15];
-wire cs_bg1      = cpu1_mem_valid & ((cpu1_A[15:12] == 4'h8) | (cpu1_A[15:12] == 4'hA));
-wire cs_bg0      = cpu1_mem_valid & ((cpu1_A[15:12] == 4'h9) | (cpu1_A[15:12] == 4'hB));
-wire cs_priority = cpu1_mem_valid & (cpu1_A[15:0] == 16'hC000);
-wire cs_fgvram   = cpu1_mem_valid & (cpu1_A[15:12] == 4'hC) & (cpu1_A[11:10] != 2'b00);
+wire cs_rom      = cpu1_mem_valid & ~zod & ~cpu1_A[15];
+// the OVG-40c board (Dog Fight prototype) maps its own RAMs at 9000 / A000 / B000 instead of these
+wire cs_bg1      = cpu1_mem_valid & ~ovg & ((cpu1_A[15:12] == 4'h8) | (cpu1_A[15:12] == 4'hA));
+wire cs_bg0      = cpu1_mem_valid & ~ovg & ((cpu1_A[15:12] == 4'h9) | (cpu1_A[15:12] == 4'hB));
+wire cs_priority = cpu1_mem_valid & ~ovg & (cpu1_A[15:0] == 16'hC000);
+wire cs_fgvram   = cpu1_mem_valid & ~ovg & (cpu1_A[15:12] == 4'hC) & (cpu1_A[11:10] != 2'b00);
 wire cs_watchdog = cpu1_mem_valid & (cpu1_A[15:12] == 4'hE);
-wire cs_shared   = cpu1_mem_valid & (cpu1_A[15:11] == 5'b11110);
+wire cs_shared   = cpu1_mem_valid & ~zod & (cpu1_A[15:11] == 5'b11110);
+// Zodiack board (MAME zodiack.cpp main_map): ROM 0000-4FFF + C000-CFFF (stored at 5000), RAM 5800-5FFF, DSW0 / DSW1 /
+// IN0 / IN1 at 6081-6084, sound latches 6090, NMI mask 7100, OVG flip 7200, IRQ mask 8000; OVG RAMs as Dog Fight
+wire cs_zrom     = cpu1_mem_valid & zod & (cpu1_A < 16'h5000 || cpu1_A[15:12] == 4'hC);
+wire cs_zram     = cpu1_mem_valid & zod & (cpu1_A[15:11] == 5'b01011);
+wire cs_zio      = cpu1_mem_valid & zod & (cpu1_A[15:8] == 8'h60);
 wire cs_mainlatch = ~cpu1_IORQ_n & ~cpu1_WR_n & (cpu1_A[3:0] <= 4'h7);
 
 reg [7:0] mainlatch = 8'd0;
@@ -154,12 +168,14 @@ wire nmi_mask    = mainlatch[0];
 //   if (m_flip_screen) { flipx = !flipx; flipy = !flipy; }
 // Using rot_flip there instead looks like a harmless simplification but is wrong
 // and will silently break Planet Probe's sprite orientation.
-wire flip_screen = rot_flip ^ mainlatch[1] ^ crt_flip;
-wire cpu2_rst    = ~mainlatch[2];
+// On the OVG-40c board the latch bit flips that board's tilemaps instead (MAME orca_ovg_40c flipscreen_w).
+wire flip_screen = rot_flip ^ (mainlatch[1] & ~ovg) ^ crt_flip;
+wire cpu2_rst    = ~mainlatch[2] & ~zod;   // the Zodiack audio CPU has no reset latch
 
 //------------------------------------------------------- CPU2 — Sub ----------------------------------------------------------//
 
 wire [15:0] cpu2_A;
+reg         z_pend = 1'b0, z_snmi = 1'b0;   // Zodiack: sound latch pending (audio IRQ), audio NMI pulse
 wire [7:0]  cpu2_Dout;
 wire        cpu2_WR_n, cpu2_RD_n, cpu2_MREQ_n, cpu2_IORQ_n, cpu2_M1_n, cpu2_RFSH_n;
 
@@ -173,7 +189,7 @@ T80s cpu2
 	// appears to "fix" it. Keep this identical to cpu1.
 	.CEN(cen_cpu & ~pause),
 	.WAIT_n(1'b1),
-	.INT_n(~cpu2_irq), .NMI_n(1'b1),
+	.INT_n(~(zod ? z_pend : cpu2_irq)), .NMI_n(~z_snmi),
 	.M1_n(cpu2_M1_n), .MREQ_n(cpu2_MREQ_n), .IORQ_n(cpu2_IORQ_n),
 	.RD_n(cpu2_RD_n), .WR_n(cpu2_WR_n), .RFSH_n(cpu2_RFSH_n),
 	.A(cpu2_A), .DI(cpu2_Din), .DO(cpu2_Dout)
@@ -192,10 +208,14 @@ end
 
 wire cpu2_mem_valid = ~cpu2_MREQ_n & cpu2_RFSH_n;
 wire cs2_rom    = cpu2_mem_valid & ~cpu2_A[15] & ~cpu2_A[14] & ~cpu2_A[13];
-wire cs2_shared = cpu2_mem_valid & (cpu2_A[15:11] == 5'b01000);
-wire cs2_p2     = cpu2_mem_valid & (cpu2_A[15:0] == 16'h8000);
-wire cs2_p1     = cpu2_mem_valid & (cpu2_A[15:0] == 16'h8040);
-wire cs2_system = cpu2_mem_valid & (cpu2_A[15:0] == 16'h8080);
+wire cs2_shared = cpu2_mem_valid & ~zod & (cpu2_A[15:11] == 5'b01000);
+wire cs2_p2     = cpu2_mem_valid & ~zod & (cpu2_A[15:0] == 16'h8000);
+wire cs2_p1     = cpu2_mem_valid & ~zod & (cpu2_A[15:0] == 16'h8040);
+wire cs2_system = cpu2_mem_valid & ~zod & (cpu2_A[15:0] == 16'h8080);
+// Zodiack audio CPU (MAME sound_map): ROM 0000-1FFF, RAM 2000-23FF, NMI enable 4000, sound latches 6000; AY on I/O 00 / 01
+wire cs2_zram   = cpu2_mem_valid & zod & (cpu2_A[15:10] == 6'b001000);
+wire cs2_zlat   = cpu2_mem_valid & zod & (cpu2_A[15:0] == 16'h6000);
+wire cs2_znmi   = cpu2_mem_valid & zod & (cpu2_A[15:0] == 16'h4000);
 wire cs2_ay_addr = ~cpu2_IORQ_n & ~cpu2_WR_n & (cpu2_A[3:0] == 4'h0);
 wire cs2_ay_wr   = ~cpu2_IORQ_n & ~cpu2_WR_n & (cpu2_A[3:0] == 4'h1);
 wire cs2_ay_rd   = ~cpu2_IORQ_n & ~cpu2_RD_n & (cpu2_A[3:0] == 4'h2);
@@ -203,7 +223,7 @@ wire cs2_ay_rd   = ~cpu2_IORQ_n & ~cpu2_RD_n & (cpu2_A[3:0] == 4'h2);
 //---------------------------------------------------------- ROMs -------------------------------------------------------------//
 
 wire [7:0] main_rom_D;
-eprom_32k main_rom (.CLK(clk_49m), .ADDR(cpu1_A[14:0]), .CLK_DL(clk_49m),
+eprom_32k main_rom (.CLK(clk_49m), .ADDR(zod && cpu1_A[15] ? {3'b101, cpu1_A[11:0]} : cpu1_A[14:0]), .CLK_DL(clk_49m),
 	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(main_rom_cs_i), .WR(ioctl_wr), .DATA(main_rom_D));
 
 wire [7:0] sub_rom_D;
@@ -257,14 +277,76 @@ dpram_dc #(.widthad_a(8)) hs_ram (
     .data_b(hs_data_in), .wren_b(hs_write),
     .q_b(hs_ram_q));
 
+wire       ovg_cs;                // OVG-40c board RAMs (instance at the end of the file)
+wire [7:0] ovg_D;
+wire [4:0] ovg_r, ovg_g, ovg_b;
+
 wire [7:0] cpu1_Din = cs_rom ? main_rom_D : cs_bg1 ? bg1_vram_D : cs_bg0 ? bg0_vram_D :
-                      cs_fgvram ? fg_vram_D : cs_shared ? shared_ram_D_cpu1 : 8'hFF;
+                      cs_fgvram ? fg_vram_D : cs_shared ? shared_ram_D_cpu1 : ovg_cs ? ovg_D :
+                      cs_zrom ? main_rom_D : cs_zram ? zram_D : cs_zio ? zio_D : 8'hFF;
 
 wire [7:0] p1_inputs     = p1_controls;
 wire [7:0] p2_inputs     = p2_controls;
 wire [7:0] system_inputs = sys_controls;
 
 assign hs_data_out = hs_ram_q;
+
+//------------------------------------------------ Zodiack CPU / audio board ---------------------------------------------------//
+
+// Main side: 2K RAM, latches, interrupt masks, DSW / inputs (MAME zodiack.cpp)
+wire [7:0] ay_ioa;                         // AY port A output (audio NMI rate), from the AY below
+wire [7:0] zram_D;
+dpram_dc #(.widthad_a(11)) zram (
+	.clock_a(clk_49m), .address_a(cpu1_A[10:0]), .data_a(cpu1_Dout), .wren_a(cs_zram & ~cpu1_WR_n), .q_a(zram_D),
+	.clock_b(clk_49m), .address_b(11'd0), .q_b());
+
+reg  [7:0] z_lat0 = 8'd0, z_lat1 = 8'd0;   // 0: main -> audio (pending raises the audio IRQ), 1: audio -> main
+reg        z_irq_en = 1'b0, z_flip_d = 1'b1, z_snmi_en = 1'b0;   // flip off until the game writes 7200 (MAME m_flip_screen = false)
+wire [7:0] zio_D = cpu1_A[7:0] == 8'h81 ? dip_sw[7:0] | zin2 : cpu1_A[7:0] == 8'h82 ? dip_sw[15:8] :
+                   cpu1_A[7:0] == 8'h83 ? zin0 : cpu1_A[7:0] == 8'h84 ? zin1 : cpu1_A[7:0] == 8'h90 ? z_lat1 : 8'hFF;
+wire       z_wr1 = cen_cpu & zod & cpu1_mem_valid & ~cpu1_WR_n;
+wire       z_wr2 = cen_cpu & zod & cpu2_mem_valid & ~cpu2_WR_n;
+
+always_ff @(posedge clk_49m) begin
+	if (!reset) begin
+		z_nmi_en <= 0; z_irq_en <= 0; z_irq <= 0; z_pend <= 0; z_snmi_en <= 0; z_flip_d <= 1'b1;
+	end else begin
+		if (z_wr1) case (cpu1_A)
+			16'h6090: begin z_lat0 <= cpu1_Dout; z_pend <= 1'b1; end
+			16'h7100: z_nmi_en <= ~cpu1_Dout[0];
+			16'h7200: z_flip_d <= cpu1_Dout[0];
+			16'h8000: z_irq_en <= cpu1_Dout[0];
+			default: ;
+		endcase
+		// VBLANK: NMI (above, with the Vastar one) and IRQ held until the CPU acknowledges it (MAME HOLD_LINE)
+		if (zod && vblk && !vblk_prev && z_irq_en) z_irq <= 1'b1;
+		else if (~cpu1_IORQ_n & ~cpu1_M1_n) z_irq <= 1'b0;
+		if (z_wr2 && cs2_zlat) z_lat1 <= cpu2_Dout;
+		if (z_wr2 && cs2_znmi) z_snmi_en <= cpu2_Dout[0];
+		if (cs2_zlat && ~cpu2_RD_n) z_pend <= 1'b0;      // reading the latch clears it (generic_latch_8)
+	end
+end
+
+// Audio side: 1K RAM
+wire [7:0] zram2_D;
+dpram_dc #(.widthad_a(10)) zram2 (
+	.clock_a(clk_49m), .address_a(cpu2_A[9:0]), .data_a(cpu2_Dout), .wren_a(cs2_zram & ~cpu2_WR_n), .q_a(zram2_D),
+	.clock_b(clk_49m), .address_b(10'd0), .q_b());
+
+// Audio NMI (MAME porta_w / sound_nmi_gen): AY port A C0 = 4 per frame, E0 = 8 per frame, 00 = off; other values are
+// ignored. 264 lines per frame -> every 66 / 33 lines.
+reg [7:0] z_sfreq = 8'd0;
+reg [6:0] z_slines = 7'd0;
+always_ff @(posedge clk_49m) begin
+	z_snmi <= 1'b0;
+	if (ay_ioa == 8'h00 || ay_ioa == 8'hC0 || ay_ioa == 8'hE0) z_sfreq <= ay_ioa;
+	if (cen_pix && base_h_cnt == 9'd0) begin
+		if (z_slines >= (z_sfreq == 8'hC0 ? 7'd65 : 7'd32)) begin
+			z_slines <= 7'd0;
+			z_snmi   <= zod & z_snmi_en & (z_sfreq != 8'h00);
+		end else z_slines <= z_slines + 7'd1;
+	end
+end
 
 //---------------------------------------------------- AY-3-8910 --------------------------------------------------------------//
 
@@ -275,7 +357,7 @@ jt49_bus ay (
 	.bdir(cs2_ay_addr | cs2_ay_wr), .bc1(cs2_ay_addr | cs2_ay_rd),
 	.din(cpu2_Dout), .dout(ay_dout), .sel(1'b1),
 	.sound(ay_sound), .sample(), .A(), .B(), .C(),
-	.IOA_in(dip_sw[7:0]), .IOB_in(dip_sw[15:8]), .IOA_out(), .IOB_out()
+	.IOA_in(dip_sw[7:0]), .IOB_in(dip_sw[15:8]), .IOA_out(ay_ioa), .IOB_out()
 );
 // jt49 sound output is UNSIGNED 10-bit (see jt49.v). Zero-extend it into the
 // signed 16-bit output frame: sign-extending the MSB instead wraps at
@@ -283,7 +365,7 @@ jt49_bus ay (
 assign sound = {1'b0, ay_sound, 5'd0};
 
 wire [7:0] cpu2_Din = (~cpu2_IORQ_n) ? (cs2_ay_rd ? ay_dout : 8'hFF) :
-                      cs2_rom ? sub_rom_D : cs2_shared ? shared_ram_D_cpu2 :
+                      cs2_rom ? sub_rom_D : cs2_shared ? shared_ram_D_cpu2 : cs2_zram ? zram2_D : cs2_zlat ? z_lat0 :
                       cs2_p2 ? p2_inputs : cs2_p1 ? p1_inputs :
                       cs2_system ? system_inputs : 8'hFF;
 
@@ -1047,8 +1129,41 @@ end
 wire [7:0] prom_addr = (hblk | vblk) ? 8'd0 : final_pixel;
 
 // Scale 4-bit PROM output to 5-bit for MiSTer
-assign red   = {prom_r_D[3:0], prom_r_D[3]};
-assign green = {prom_g_D[3:0], prom_g_D[3]};
-assign blue  = {prom_b_D[3:0], prom_b_D[3]};
+assign red   = ovg ? ovg_r : {prom_r_D[3:0], prom_r_D[3]};
+assign green = ovg ? ovg_g : {prom_g_D[3:0], prom_g_D[3]};
+assign blue  = ovg ? ovg_b : {prom_b_D[3:0], prom_b_D[3]};
+
+//------------------------------------------------ Orca OVG-40c video board ---------------------------------------------------//
+
+// Same line timing and page flip as the Vastar renderer, so its output lines up with the same syncs. It draws
+// MAME's bitmap the other way round from the Vastar board (line v, column h rather than 255 - v / 255 - h):
+// Dog Fight is ROT270 where Vastar is ROT90, through the same CCW screen rotation. The Bounty (ROT180, horizontal)
+// uses the Vastar board's 255 - v / 255 - h with no screen rotation.
+Vastar_OVG40C ovg_pcb
+(
+	.clk_49m(clk_49m),
+	.reset(reset),
+	.cpu_A(cpu1_A),
+	.cpu_Dout(cpu1_Dout),
+	.cpu_mem_valid(cpu1_mem_valid & ovg),
+	.cpu_wr(~cpu1_WR_n),
+	.cs(ovg_cs),
+	.cpu_Din(ovg_D),
+	.render_start(ovg && cen_pix && base_h_cnt == 9'd0 && v_cnt_rot >= 9'd15 && v_cnt_rot < 9'd241),
+	.rline(horz ? 8'd255 - v_cnt_rot[7:0] : v_cnt_rot[7:0]),
+	.lb_page(lb_page),
+	.disp_x(horz ? 8'd255 - h_cnt_rot[7:0] : h_cnt_rot[7:0]),
+	.blank(hblk | vblk),
+	.flip(zod ? ~z_flip_d : ~mainlatch[1]),
+	.percuss(~zod | percuss),
+	.ioctl_addr(ioctl_addr),
+	.ioctl_data(ioctl_data),
+	.ioctl_wr(ioctl_wr),
+	.gfx_cs(ovg_gfx_cs_i),
+	.prom_cs(ovg_prom_cs_i),
+	.red(ovg_r),
+	.green(ovg_g),
+	.blue(ovg_b)
+);
 
 endmodule
