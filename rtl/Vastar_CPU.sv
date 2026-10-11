@@ -106,8 +106,10 @@ wire [8:0] hs_start = 9'd280 + {{5{h_center[3]}}, h_center};
 wire [8:0] hs_end   = hs_start + 9'd16;
 wire [8:0] vs_start = 9'd249 + {{5{v_center[3]}}, v_center};
 wire [8:0] vs_end   = vs_start + 9'd4;
-assign video_hsync = (h_cnt_rot >= hs_start && h_cnt_rot < hs_end);
-assign video_vsync = (v_cnt_rot >= vs_start && v_cnt_rot < vs_end);
+// Syncs come from the UNflipped counters: with flip_screen set, h_cnt_rot never reaches 280-295 (no hsync at all)
+// and v_cnt_rot moves vsync out of place. Only the render addressing is mirrored.
+assign video_hsync = (base_h_cnt >= hs_start && base_h_cnt < hs_end);
+assign video_vsync = (v_cnt >= vs_start && v_cnt < vs_end);
 assign video_csync = ~(video_hsync ^ video_vsync);
 
 //------------------------------------------------------- CPU1 — Main ---------------------------------------------------------//
@@ -159,17 +161,19 @@ end
 wire nmi_mask    = mainlatch[0];
 // flip_screen, rot_flip and crt_flip are DIFFERENT signals, not interchangeable:
 //   rot_flip    — MiSTer-side screen-rotation flag (Vastar=0, Planet Probe=1), fixed per game.
-//   crt_flip    — OSD 180 degree flip. Belongs HERE and nowhere else; in particular
-//                 not in rotate_ccw, which selects the 90 degree rotation direction.
+//   crt_flip    — OSD 180 degree flip. Raster mirror ONLY (h_cnt_rot / v_cnt_rot); it must stay out of game_flip,
+//                 or the sprite decode below flips sprites a second time. Not in rotate_ccw either, which selects
+//                 the 90 degree rotation direction.
 //   flip_screen — this signal, additionally folds in the game's own flip-screen
 //                 latch bit (mainlatch[1]), which the game can change at runtime.
 // The per-sprite flipX/flipY inversion (below, in the sprite decode) is gated on
-// flip_screen, matching MAME vastar_viddev.cpp:
+// game_flip (flip_screen without crt_flip), matching MAME vastar_viddev.cpp:
 //   if (m_flip_screen) { flipx = !flipx; flipy = !flipy; }
 // Using rot_flip there instead looks like a harmless simplification but is wrong
 // and will silently break Planet Probe's sprite orientation.
 // On the OVG-40c board the latch bit flips that board's tilemaps instead (MAME orca_ovg_40c flipscreen_w).
-wire flip_screen = rot_flip ^ (mainlatch[1] & ~ovg) ^ crt_flip;
+wire game_flip   = rot_flip ^ (mainlatch[1] & ~ovg);
+wire flip_screen = game_flip ^ crt_flip;
 wire cpu2_rst    = ~mainlatch[2] & ~zod;   // the Zodiack audio CPU has no reset latch
 
 //------------------------------------------------------- CPU2 — Sub ----------------------------------------------------------//
@@ -928,9 +932,9 @@ always_ff @(posedge clk_49m) begin
 					code = {spr_attr_raw[0], spr_code_raw[7:2]} + tilebase;
 					spr_code <= code;
 					// Per-sprite flip bits are inverted when the board is flipped, gated on
-					// flip_screen (see the flip_screen declaration above — NOT rot_flip).
-					spr_flipy <= spr_code_raw[0] ^ flip_screen;
-					spr_flipx <= spr_code_raw[1] ^ flip_screen;
+					// game_flip (see the flip_screen declaration above — NOT rot_flip, NOT crt_flip).
+					spr_flipy <= spr_code_raw[0] ^ game_flip;
+					spr_flipx <= spr_code_raw[1] ^ game_flip;
 					spr_dbl <= spr_attr_raw[3];
 				end
 				spr_state <= 6;
@@ -940,7 +944,7 @@ always_ff @(posedge clk_49m) begin
 				begin
 					reg [7:0] sy, sprite_height;
 					reg [8:0] local_y;
-					sy = flip_screen ? spr_y : (spr_dbl ? (8'd224 - spr_y) : (8'd240 - spr_y));
+					sy = game_flip ? spr_y : (spr_dbl ? (8'd224 - spr_y) : (8'd240 - spr_y));
 					sprite_height = spr_dbl ? 8'd32 : 8'd16;
 					local_y = {1'b0, rline} - {1'b0, sy};
 					if (local_y[8:0] < {1'b0, sprite_height}) begin
