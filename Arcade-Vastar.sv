@@ -192,11 +192,8 @@ assign cfg_data = 0;
 // execute against an unstable clock or partial ROM data.
 wire reset = RESET | status[0] | buttons[1] | ioctl_download | ~locked;
 
-// Async-assert / sync-deassert reset synchronizer. Raw `reset` above is a combinational OR of
-// async terms (HPS reset/download, PLL ~locked), but it feeds CPUs running on CLK_49M. Releasing
-// it unsynchronized lets the CPU catch the
-// deassert at a random CLK_49M phase each boot, causing intermittent bad boots. Registering
-// the release onto CLK_49M gives a clean, deterministic edge instead.
+// Async-assert / sync-deassert: the reset release lands on a CLK_49M edge (an unsynchronized release caught the CPUs
+// at a random phase and gave intermittent bad boots).
 reg [1:0] rst_sync = 2'b11;
 always @(posedge CLK_49M or posedge reset) begin
 	if (reset) rst_sync <= 2'b11;
@@ -206,46 +203,7 @@ wire reset_sync = rst_sync[1];
 
 ///////////////////         Keyboard           //////////////////
 
-// CTL-2026-10-25: original keyboard block, replaced by ctl_keyboard below
-// reg btn_up       = 0;
-// reg btn_down     = 0;
-// reg btn_left     = 0;
-// reg btn_right    = 0;
-// reg btn_fire     = 0;
-// reg btn_fire2    = 0;
-// reg btn_coin1    = 0;
-// reg btn_coin2    = 0;
-// reg btn_1p_start = 0;
-// reg btn_2p_start = 0;
-// reg btn_pause    = 0;
-// reg btn_service  = 0;
-//
-// wire pressed = ps2_key[9];
-// wire [7:0] code = ps2_key[7:0];
-// always @(posedge CLK_49M) begin
-// 	reg old_state;
-// 	old_state <= ps2_key[10];
-// 	if(old_state != ps2_key[10]) begin
-// 		case(code)
-// 			'h16: btn_1p_start <= pressed; // 1
-// 			'h1E: btn_2p_start <= pressed; // 2
-// 			'h2E: btn_coin1    <= pressed; // 5
-// 			'h36: btn_coin2    <= pressed; // 6
-// 			'h46: btn_service  <= pressed; // 9
-// 			'h4D: btn_pause    <= pressed; // P
-//
-// 			'h75: btn_up      <= pressed; // up
-// 			'h72: btn_down    <= pressed; // down
-// 			'h6B: btn_left    <= pressed; // left
-// 			'h74: btn_right   <= pressed; // right
-// 			'h14: btn_fire    <= pressed; // ctrl
-// 			'h11: btn_fire2   <= pressed; // alt
-// 		endcase
-// 	end
-// end
-// CTL-2026-10-25: keyboard -> controllers.sv ctl_keyboard (same 12 keys; extended bit ignored = STD_EXT 0, as before).
-// pause_cpu: no toggle keys here, so the keyboard behaves the same paused or not.
-wire        pause_cpu;   // CTL-2026-10-25: declared here (was in PAUSE SYSTEM below) so ctl_keyboard can take it
+wire        pause_cpu;   // from the pause block below; ctl_keyboard takes it too
 wire [12:0] kb;
 /* verilator lint_off PINCONNECTEMPTY */
 ctl_keyboard keyboard(.clk(CLK_49M), .ps2_key(ps2_key), .pause(pause_cpu), .kb(kb), .kbx());
@@ -289,7 +247,7 @@ wire m_coin2    = btn_coin2;
 wire m_pause    = btn_pause    | joystick_0[9];
 
 // Zodiack board inputs (active high): each IN0 / IN1 bit takes the control the MRA input map names (0 = none).
-// Directions are game-space, MiSTer bits 0 R / 1 L / 2 D / 3 U, as MAME's ports define them.
+// Directions are game-space, MiSTer bits 0 R / 1 L / 2 D / 3 U, as the game's ports define them.
 wire [31:0] ctl = {
 	10'd0,
 	btn_service,                                       // 21 service
@@ -309,7 +267,6 @@ generate for (zb = 0; zb < 8; zb = zb + 1) begin : zinmap
 end endgenerate
 
 // PAUSE SYSTEM
-// wire pause_cpu;   // CTL-2026-10-25: moved up to the keyboard block
 wire [23:0] rgb_out;
 pause #(8,8,8,49) pause
 (
@@ -332,7 +289,7 @@ end
 // bit1: Orca OVG-40c video board instead of the Vastar one (Dog Fight prototype).
 // bit2: Zodiack CPU / audio board (Zodiack, Dog Fight). Bytes 1-16: its IN0 / IN1 input map, one control id per bit;
 //       bytes 17-24: controls ORed into DSW0 (Percussor / Bounty read button 2 there).
-// bit3: OVG-40c sprites / bullets follow the flip in Y (MAME percuss_hardware: Percussor, Mogu Chan, Bounty).
+// bit3: OVG-40c sprites / bullets follow the flip in Y (Percussor, Mogu Chan, Bounty).
 // bit4: horizontal game, picture rotated 180 (The Bounty).
 always_ff @(posedge CLK_49M) begin
     if (ioctl_wr && ioctl_index == 8'd1 && ioctl_addr == 25'd0) begin
@@ -400,8 +357,8 @@ wire [7:0] p1_controls  = {2'b00, m_fire1b, m_fire1, m_right1, m_left1, m_down1,
 wire [7:0] p2_controls  = {2'b00, m_fire2b, m_fire2, m_right2, m_left2, m_down2, m_up2};
 wire [7:0] sys_controls = {2'b00, btn_service, m_start2, m_start1, 1'b0, m_coin2, m_coin1};
 
-// Instantiate Vastar top-level module
-Vastar vastar_inst
+// Board: rtl/vastar_dispatcher.sv
+vastar_dispatcher vastar_inst
 (
 	.reset(~reset_sync),
 

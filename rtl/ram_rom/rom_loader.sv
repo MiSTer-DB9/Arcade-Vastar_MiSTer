@@ -37,7 +37,7 @@
 // 0x14300 - 0x143FF = prom_unk  (tbp24s10.8n - unknown,    256 bytes)
 // Total: 0x14400 = 82,944 bytes
 // Orca OVG-40c video board (Dog Fight prototype), after the Vastar regions:
-// 0x14400 - 0x173FF = ovg_gfx   ("videopcb" region as MAME lays it out, 0x3000)
+// 0x14400 - 0x173FF = ovg_gfx   ("videopcb" region, 0x3000)
 // 0x17400 - 0x1743F = ovg_prom  ("videopcb:proms", 0x40)
 
 module selector
