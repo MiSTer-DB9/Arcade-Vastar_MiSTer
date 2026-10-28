@@ -3,7 +3,7 @@
 //  Vastar CPU board — dual Z80 system, video rendering, and sound
 //  Copyright (C) 2026 Rodimus
 //
-//  MAME reference: vastar.cpp, vastar_viddev.cpp
+//  MAME reference: vastar.cpp, vastar_viddev.cpp, zodiack.cpp
 //  Hardware: Z80 CPU1 + Z80 CPU2 @ 3.072 MHz (XTAL 18.432 / 6)
 //            AY-3-8910 @ 1.536 MHz (18.432 / 12)
 //  Screen: 288x264 total, visible 256x224 (lines 17-240), ~60.6 Hz
@@ -25,27 +25,54 @@ module Vastar_CPU
 	input  [15:0] dip_sw,
     input         rot_flip,
 	input         ovg,           // Orca OVG-40c video board instead of the Vastar one (Dog Fight prototype)
-	input         zod,           // Zodiack CPU / audio board (MAME zodiack.cpp) instead of the Vastar one
+	input         zod,           // Zodiack CPU / audio board instead of the Vastar one
 	input   [7:0] zin0, zin1,    // its IN0 / IN1 (6083 / 6084), assembled by the top level from the MRA input map
 	input   [7:0] zin2,          // controls ORed into DSW0 (6081)
-	input         percuss,       // OVG-40c sprites / bullets follow the flip in Y (MAME percuss_hardware)
+	input         percuss,       // OVG-40c sprites / bullets follow the flip in Y (Percussor hardware)
 	input         horz,          // horizontal game rotated 180 (The Bounty): OVG draws like the Vastar board
 	input         crt_flip,      // OSD 180 degree flip
 	output signed [15:0] sound,
 	input   [3:0] h_center, v_center,
-	input         main_rom_cs_i, sub_rom_cs_i, fgtile_cs_i,
-	input         sprite0_cs_i, sprite1_cs_i,
-	input         bgtile0_cs_i, bgtile1_cs_i,
-	input         prom_r_cs_i, prom_g_cs_i, prom_b_cs_i, prom_unk_cs_i,
-	input         ovg_gfx_cs_i, ovg_prom_cs_i,
-	input  [24:0] ioctl_addr,
-	input   [7:0] ioctl_data,
-	input         ioctl_wr,
 	input         pause,
 	input  [15:0] hs_address,
 	input   [7:0] hs_data_in,
 	output  [7:0] hs_data_out,
-	input         hs_write
+	input         hs_write,
+
+	// shared CPU / sound chip pool (rtl/vastar_dispatcher.sv)
+	output chip_pool_pkg::z80r_i_t [1:0] z80_i,   // 0 main, 1 sub (Zodiack: audio)
+	input  chip_pool_pkg::z80r_o_t [1:0] z80_o,
+	output chip_pool_pkg::ayr_i_t        ay_0_i,
+	input  chip_pool_pkg::ayio_o_t       ay_0_o,
+
+	// shared ROM blocks, read ports
+	output [14:0] main_rom_a,
+	input   [7:0] main_rom_d,
+	output [12:0] sub_rom_a,
+	input   [7:0] sub_rom_d,
+	output [12:0] fgtile_rom_a,
+	input   [7:0] fgtile_rom_d,
+	output [12:0] bgtile0_rom_a,
+	input   [7:0] bgtile0_rom_d,
+	output [12:0] bgtile1_rom_a,
+	input   [7:0] bgtile1_rom_d,
+	output [12:0] sprite_rom_a,       // sprite planes 0 / 1, read together
+	input   [7:0] sprite0_rom_d,
+	input   [7:0] sprite1_rom_d,
+	output  [7:0] prom_a,             // colour PROMs R / G / B, read together
+	input   [7:0] prom_r_d,
+	input   [7:0] prom_g_d,
+	input   [7:0] prom_b_d,
+	output  [7:0] prom_unk_a,         // tbp24s10.8n, function unknown (see the dispatcher)
+	input   [7:0] prom_unk_d,
+	output [13:0] ovg_gfx_a,
+	input   [7:0] ovg_gfx_d,
+	output  [5:0] ovg_prom_a,
+	input   [7:0] ovg_prom_d,
+
+	// board RAM pool
+	output ram_pool_pkg::pram_i_t [6:0] pr_i,
+	input  ram_pool_pkg::pram_o_t [6:0] pr_o
 );
 
 //------------------------------------------------------- Clock enables -------------------------------------------------------//
@@ -119,14 +146,9 @@ reg         z_irq = 1'b0, z_nmi_en = 1'b0;   // Zodiack board main IRQ (held unt
 wire [7:0]  cpu1_Dout;
 wire        cpu1_WR_n, cpu1_RD_n, cpu1_MREQ_n, cpu1_IORQ_n, cpu1_M1_n, cpu1_RFSH_n;
 
-T80s cpu1
-(
-	.RESET_n(reset), .CLK(clk_49m), .CEN(cen_cpu & ~pause), .WAIT_n(1'b1),
-	.INT_n(~z_irq), .NMI_n(~cpu1_nmi),
-	.M1_n(cpu1_M1_n), .MREQ_n(cpu1_MREQ_n), .IORQ_n(cpu1_IORQ_n),
-	.RD_n(cpu1_RD_n), .WR_n(cpu1_WR_n), .RFSH_n(cpu1_RFSH_n),
-	.A(cpu1_A), .DI(cpu1_Din), .DO(cpu1_Dout)
-);
+assign cpu1_M1_n = z80_o[0].m1_n; assign cpu1_MREQ_n = z80_o[0].mreq_n; assign cpu1_IORQ_n = z80_o[0].iorq_n;
+assign cpu1_RD_n = z80_o[0].rd_n; assign cpu1_WR_n = z80_o[0].wr_n; assign cpu1_RFSH_n = z80_o[0].rfsh_n;
+assign cpu1_A = z80_o[0].a; assign cpu1_Dout = z80_o[0].dout;
 
 reg cpu1_nmi = 1'b0;
 reg vblk_prev = 1'b0;
@@ -146,7 +168,7 @@ wire cs_priority = cpu1_mem_valid & ~ovg & (cpu1_A[15:0] == 16'hC000);
 wire cs_fgvram   = cpu1_mem_valid & ~ovg & (cpu1_A[15:12] == 4'hC) & (cpu1_A[11:10] != 2'b00);
 wire cs_watchdog = cpu1_mem_valid & (cpu1_A[15:12] == 4'hE);
 wire cs_shared   = cpu1_mem_valid & ~zod & (cpu1_A[15:11] == 5'b11110);
-// Zodiack board (MAME zodiack.cpp main_map): ROM 0000-4FFF + C000-CFFF (stored at 5000), RAM 5800-5FFF, DSW0 / DSW1 /
+// Zodiack board main map: ROM 0000-4FFF + C000-CFFF (stored at 5000), RAM 5800-5FFF, DSW0 / DSW1 /
 // IN0 / IN1 at 6081-6084, sound latches 6090, NMI mask 7100, OVG flip 7200, IRQ mask 8000; OVG RAMs as Dog Fight
 wire cs_zrom     = cpu1_mem_valid & zod & (cpu1_A < 16'h5000 || cpu1_A[15:12] == 4'hC);
 wire cs_zram     = cpu1_mem_valid & zod & (cpu1_A[15:11] == 5'b01011);
@@ -159,19 +181,11 @@ always_ff @(posedge clk_49m) begin
 	else if (cen_cpu && cs_mainlatch) mainlatch[cpu1_A[2:0]] <= cpu1_Dout[0];
 end
 wire nmi_mask    = mainlatch[0];
-// flip_screen, rot_flip and crt_flip are DIFFERENT signals, not interchangeable:
-//   rot_flip    — MiSTer-side screen-rotation flag (Vastar=0, Planet Probe=1), fixed per game.
-//   crt_flip    — OSD 180 degree flip. Raster mirror ONLY (h_cnt_rot / v_cnt_rot); it must stay out of game_flip,
-//                 or the sprite decode below flips sprites a second time. Not in rotate_ccw either, which selects
-//                 the 90 degree rotation direction.
-//   flip_screen — this signal, additionally folds in the game's own flip-screen
-//                 latch bit (mainlatch[1]), which the game can change at runtime.
-// The per-sprite flipX/flipY inversion (below, in the sprite decode) is gated on
-// game_flip (flip_screen without crt_flip), matching MAME vastar_viddev.cpp:
-//   if (m_flip_screen) { flipx = !flipx; flipy = !flipy; }
-// Using rot_flip there instead looks like a harmless simplification but is wrong
-// and will silently break Planet Probe's sprite orientation.
-// On the OVG-40c board the latch bit flips that board's tilemaps instead (MAME orca_ovg_40c flipscreen_w).
+// rot_flip, crt_flip and game_flip are not interchangeable:
+//   rot_flip     screen-rotation flag per game (Vastar 0, Planet Probe 1)
+//   crt_flip     OSD 180 degree flip: raster mirror only, kept out of game_flip so sprites are not flipped twice
+//   game_flip    rot_flip ^ the game's flip latch (mainlatch[1]); it inverts each sprite's flip x / y (gating that on
+//                rot_flip alone breaks Planet Probe's sprites). On the OVG-40c board the latch flips its tilemaps instead.
 wire game_flip   = rot_flip ^ (mainlatch[1] & ~ovg);
 wire flip_screen = game_flip ^ crt_flip;
 wire cpu2_rst    = ~mainlatch[2] & ~zod;   // the Zodiack audio CPU has no reset latch
@@ -183,21 +197,9 @@ reg         z_pend = 1'b0, z_snmi = 1'b0;   // Zodiack: sound latch pending (aud
 wire [7:0]  cpu2_Dout;
 wire        cpu2_WR_n, cpu2_RD_n, cpu2_MREQ_n, cpu2_IORQ_n, cpu2_M1_n, cpu2_RFSH_n;
 
-T80s cpu2
-(
-	.RESET_n(reset & ~cpu2_rst), .CLK(clk_49m),
-	// Both Z80s are identical 3.072 MHz parts on the real board, so they must share one timing model:
-	// the boot handshake depends on their RELATIVE speed. A different T80 wrapper here makes the sub
-	// lose that race against the main's power-on self-test, which then reports a sub/RAM check
-	// failure on a cold boot while a soft reset (which leaves the sub's answer already in RAM)
-	// appears to "fix" it. Keep this identical to cpu1.
-	.CEN(cen_cpu & ~pause),
-	.WAIT_n(1'b1),
-	.INT_n(~(zod ? z_pend : cpu2_irq)), .NMI_n(~z_snmi),
-	.M1_n(cpu2_M1_n), .MREQ_n(cpu2_MREQ_n), .IORQ_n(cpu2_IORQ_n),
-	.RD_n(cpu2_RD_n), .WR_n(cpu2_WR_n), .RFSH_n(cpu2_RFSH_n),
-	.A(cpu2_A), .DI(cpu2_Din), .DO(cpu2_Dout)
-);
+assign cpu2_M1_n = z80_o[1].m1_n; assign cpu2_MREQ_n = z80_o[1].mreq_n; assign cpu2_IORQ_n = z80_o[1].iorq_n;
+assign cpu2_RD_n = z80_o[1].rd_n; assign cpu2_WR_n = z80_o[1].wr_n; assign cpu2_RFSH_n = z80_o[1].rfsh_n;
+assign cpu2_A = z80_o[1].a; assign cpu2_Dout = z80_o[1].dout;
 
 reg [17:0] cpu2_irq_cnt = 18'd0;
 reg        cpu2_irq = 1'b0;
@@ -216,7 +218,7 @@ wire cs2_shared = cpu2_mem_valid & ~zod & (cpu2_A[15:11] == 5'b01000);
 wire cs2_p2     = cpu2_mem_valid & ~zod & (cpu2_A[15:0] == 16'h8000);
 wire cs2_p1     = cpu2_mem_valid & ~zod & (cpu2_A[15:0] == 16'h8040);
 wire cs2_system = cpu2_mem_valid & ~zod & (cpu2_A[15:0] == 16'h8080);
-// Zodiack audio CPU (MAME sound_map): ROM 0000-1FFF, RAM 2000-23FF, NMI enable 4000, sound latches 6000; AY on I/O 00 / 01
+// Zodiack audio CPU map: ROM 0000-1FFF, RAM 2000-23FF, NMI enable 4000, sound latches 6000; AY on I/O 00 / 01
 wire cs2_zram   = cpu2_mem_valid & zod & (cpu2_A[15:10] == 6'b001000);
 wire cs2_zlat   = cpu2_mem_valid & zod & (cpu2_A[15:0] == 16'h6000);
 wire cs2_znmi   = cpu2_mem_valid & zod & (cpu2_A[15:0] == 16'h4000);
@@ -227,14 +229,24 @@ wire cs2_ay_rd   = ~cpu2_IORQ_n & ~cpu2_RD_n & (cpu2_A[3:0] == 4'h2);
 //---------------------------------------------------------- ROMs -------------------------------------------------------------//
 
 wire [7:0] main_rom_D;
-eprom_32k main_rom (.CLK(clk_49m), .ADDR(zod && cpu1_A[15] ? {3'b101, cpu1_A[11:0]} : cpu1_A[14:0]), .CLK_DL(clk_49m),
-	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(main_rom_cs_i), .WR(ioctl_wr), .DATA(main_rom_D));
+assign main_rom_a = zod && cpu1_A[15] ? {3'b101, cpu1_A[11:0]} : cpu1_A[14:0];
+assign main_rom_D = main_rom_d;
 
 wire [7:0] sub_rom_D;
-eprom_8k sub_rom (.CLK(clk_49m), .ADDR(cpu2_A[12:0]), .CLK_DL(clk_49m),
-	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(sub_rom_cs_i), .WR(ioctl_wr), .DATA(sub_rom_D));
+assign sub_rom_a = cpu2_A[12:0];
+assign sub_rom_D = sub_rom_d;
 
 //------------------------------------------------------- VRAM ---------------------------------------------------------------//
+
+// board RAM pool: blocks 0-2 = Vastar video RAMs or the OVG-40c obj / fg / bg RAMs, 3 = CPU-shared RAM or the Zodiack
+// main RAM, 4 = hiscore copy, 5 = Zodiack audio RAM, 6 = OVG-40c line buffer
+ram_pool_pkg::pram_i_t [3:0] vs_pr_i;                 // Vastar board side of blocks 0-3
+ram_pool_pkg::pram_i_t [2:0] ovg_pr_i;                // OVG-40c side of blocks 0-2
+ram_pool_pkg::pram_i_t       z_pr_i;                  // Zodiack side of block 3
+assign pr_i[0] = ovg ? ovg_pr_i[0] : vs_pr_i[0];
+assign pr_i[1] = ovg ? ovg_pr_i[1] : vs_pr_i[1];
+assign pr_i[2] = ovg ? ovg_pr_i[2] : vs_pr_i[2];
+assign pr_i[3] = zod ? z_pr_i : vs_pr_i[3];
 
 wire [10:0] shared_addr_a = pause ? hs_address[10:0] : cpu1_A[10:0];
 wire shared_wr_a = pause ? hs_write : (cs_shared & ~cpu1_WR_n);
@@ -243,43 +255,35 @@ wire [2:0] hs_bank = rot_flip ? 3'b011 : 3'b001;
 
 wire [7:0] bg1_vram_D, bg1_vram_rD;
 reg [11:0] bg1_raddr;
-dpram_dc #(.widthad_a(12)) bg1_vram (
-	.clock_a(clk_49m), .address_a(cpu1_A[11:0]), .data_a(cpu1_Dout),
-	.wren_a(cs_bg1 & ~cpu1_WR_n), .q_a(bg1_vram_D),
-	.clock_b(clk_49m), .address_b(bg1_raddr), .data_b(8'd0), .wren_b(1'b0), .q_b(bg1_vram_rD));
+assign vs_pr_i[0].a_addr = {3'd0, cpu1_A[11:0]}; assign vs_pr_i[0].a_d = cpu1_Dout; assign vs_pr_i[0].a_we = cs_bg1 & ~cpu1_WR_n;
+assign vs_pr_i[0].b_addr = {3'd0, bg1_raddr}; assign vs_pr_i[0].b_d = 8'd0; assign vs_pr_i[0].b_we = 1'b0;
+assign bg1_vram_D = pr_o[0].a_q;
+assign bg1_vram_rD = pr_o[0].b_q;
 
 wire [7:0] bg0_vram_D, bg0_vram_rD;
 reg [11:0] bg0_raddr;
-dpram_dc #(.widthad_a(12)) bg0_vram (
-	.clock_a(clk_49m), .address_a(cpu1_A[11:0]), .data_a(cpu1_Dout),
-	.wren_a(cs_bg0 & ~cpu1_WR_n), .q_a(bg0_vram_D),
-	.clock_b(clk_49m), .address_b(bg0_raddr), .data_b(8'd0), .wren_b(1'b0), .q_b(bg0_vram_rD));
+assign vs_pr_i[1].a_addr = {3'd0, cpu1_A[11:0]}; assign vs_pr_i[1].a_d = cpu1_Dout; assign vs_pr_i[1].a_we = cs_bg0 & ~cpu1_WR_n;
+assign vs_pr_i[1].b_addr = {3'd0, bg0_raddr}; assign vs_pr_i[1].b_d = 8'd0; assign vs_pr_i[1].b_we = 1'b0;
+assign bg0_vram_D = pr_o[1].a_q;
+assign bg0_vram_rD = pr_o[1].b_q;
 
 wire [7:0] fg_vram_D, fg_vram_rD;
 reg [11:0] fg_raddr;
-dpram_dc #(.widthad_a(12)) fg_vram (
-	.clock_a(clk_49m), .address_a(cpu1_A[11:0]), .data_a(cpu1_Dout),
-	.wren_a(cs_fgvram & ~cpu1_WR_n), .q_a(fg_vram_D),
-	.clock_b(clk_49m), .address_b(fg_raddr), .data_b(8'd0), .wren_b(1'b0), .q_b(fg_vram_rD));
+assign vs_pr_i[2].a_addr = {3'd0, cpu1_A[11:0]}; assign vs_pr_i[2].a_d = cpu1_Dout; assign vs_pr_i[2].a_we = cs_fgvram & ~cpu1_WR_n;
+assign vs_pr_i[2].b_addr = {3'd0, fg_raddr}; assign vs_pr_i[2].b_d = 8'd0; assign vs_pr_i[2].b_we = 1'b0;
+assign fg_vram_D = pr_o[2].a_q;
+assign fg_vram_rD = pr_o[2].b_q;
 
 wire [7:0] shared_ram_D_cpu1, shared_ram_D_cpu2;
-dpram_dc #(.widthad_a(11)) shared_ram (
-    .clock_a(clk_49m),
-    .address_a(hs_write ? {hs_bank, hs_address[7:0]} : cpu1_A[10:0]),
-    .data_a(hs_write ? hs_data_in : cpu1_Dout),
-    .wren_a((cs_shared & ~cpu1_WR_n) | hs_write),
-    .q_a(shared_ram_D_cpu1),
-    .clock_b(clk_49m), .address_b(cpu2_A[10:0]), .data_b(cpu2_Dout),
-    .wren_b(cs2_shared & ~cpu2_WR_n), .q_b(shared_ram_D_cpu2));
+assign vs_pr_i[3].a_addr = {4'd0, hs_write ? {hs_bank, hs_address[7:0]} : cpu1_A[10:0]}; assign vs_pr_i[3].a_d = hs_write ? hs_data_in : cpu1_Dout; assign vs_pr_i[3].a_we = (cs_shared & ~cpu1_WR_n) | hs_write;
+assign vs_pr_i[3].b_addr = {4'd0, cpu2_A[10:0]}; assign vs_pr_i[3].b_d = cpu2_Dout; assign vs_pr_i[3].b_we = cs2_shared & ~cpu2_WR_n;
+assign shared_ram_D_cpu1 = pr_o[3].a_q;
+assign shared_ram_D_cpu2 = pr_o[3].b_q;
 
 wire [7:0] hs_ram_q;
-dpram_dc #(.widthad_a(8)) hs_ram (
-    .clock_a(clk_49m), .address_a(cpu1_A[7:0]),
-    .data_a(cpu1_Dout), .wren_a(cs_shared & ~cpu1_WR_n & (cpu1_A[10:8] == hs_bank)),
-    .q_a(),
-    .clock_b(clk_49m), .address_b(hs_address[7:0]),
-    .data_b(hs_data_in), .wren_b(hs_write),
-    .q_b(hs_ram_q));
+assign pr_i[4].a_addr = {7'd0, cpu1_A[7:0]}; assign pr_i[4].a_d = cpu1_Dout; assign pr_i[4].a_we = cs_shared & ~cpu1_WR_n & (cpu1_A[10:8] == hs_bank);
+assign pr_i[4].b_addr = {7'd0, hs_address[7:0]}; assign pr_i[4].b_d = hs_data_in; assign pr_i[4].b_we = hs_write;
+assign hs_ram_q = pr_o[4].b_q;
 
 wire       ovg_cs;                // OVG-40c board RAMs (instance at the end of the file)
 wire [7:0] ovg_D;
@@ -297,15 +301,15 @@ assign hs_data_out = hs_ram_q;
 
 //------------------------------------------------ Zodiack CPU / audio board ---------------------------------------------------//
 
-// Main side: 2K RAM, latches, interrupt masks, DSW / inputs (MAME zodiack.cpp)
+// Main side: 2K RAM, latches, interrupt masks, DSW / inputs
 wire [7:0] ay_ioa;                         // AY port A output (audio NMI rate), from the AY below
 wire [7:0] zram_D;
-dpram_dc #(.widthad_a(11)) zram (
-	.clock_a(clk_49m), .address_a(cpu1_A[10:0]), .data_a(cpu1_Dout), .wren_a(cs_zram & ~cpu1_WR_n), .q_a(zram_D),
-	.clock_b(clk_49m), .address_b(11'd0), .q_b());
+assign z_pr_i.a_addr = {4'd0, cpu1_A[10:0]}; assign z_pr_i.a_d = cpu1_Dout; assign z_pr_i.a_we = cs_zram & ~cpu1_WR_n;
+assign z_pr_i.b_addr = {4'd0, 11'd0}; assign z_pr_i.b_d = 8'd0; assign z_pr_i.b_we = 1'b0;
+assign zram_D = pr_o[3].a_q;
 
 reg  [7:0] z_lat0 = 8'd0, z_lat1 = 8'd0;   // 0: main -> audio (pending raises the audio IRQ), 1: audio -> main
-reg        z_irq_en = 1'b0, z_flip_d = 1'b1, z_snmi_en = 1'b0;   // flip off until the game writes 7200 (MAME m_flip_screen = false)
+reg        z_irq_en = 1'b0, z_flip_d = 1'b1, z_snmi_en = 1'b0;   // flip off until the game writes 7200
 wire [7:0] zio_D = cpu1_A[7:0] == 8'h81 ? dip_sw[7:0] | zin2 : cpu1_A[7:0] == 8'h82 ? dip_sw[15:8] :
                    cpu1_A[7:0] == 8'h83 ? zin0 : cpu1_A[7:0] == 8'h84 ? zin1 : cpu1_A[7:0] == 8'h90 ? z_lat1 : 8'hFF;
 wire       z_wr1 = cen_cpu & zod & cpu1_mem_valid & ~cpu1_WR_n;
@@ -322,7 +326,7 @@ always_ff @(posedge clk_49m) begin
 			16'h8000: z_irq_en <= cpu1_Dout[0];
 			default: ;
 		endcase
-		// VBLANK: NMI (above, with the Vastar one) and IRQ held until the CPU acknowledges it (MAME HOLD_LINE)
+		// VBLANK: NMI (above, with the Vastar one) and IRQ held until the CPU acknowledges it
 		if (zod && vblk && !vblk_prev && z_irq_en) z_irq <= 1'b1;
 		else if (~cpu1_IORQ_n & ~cpu1_M1_n) z_irq <= 1'b0;
 		if (z_wr2 && cs2_zlat) z_lat1 <= cpu2_Dout;
@@ -333,11 +337,11 @@ end
 
 // Audio side: 1K RAM
 wire [7:0] zram2_D;
-dpram_dc #(.widthad_a(10)) zram2 (
-	.clock_a(clk_49m), .address_a(cpu2_A[9:0]), .data_a(cpu2_Dout), .wren_a(cs2_zram & ~cpu2_WR_n), .q_a(zram2_D),
-	.clock_b(clk_49m), .address_b(10'd0), .q_b());
+assign pr_i[5].a_addr = {5'd0, cpu2_A[9:0]}; assign pr_i[5].a_d = cpu2_Dout; assign pr_i[5].a_we = cs2_zram & ~cpu2_WR_n;
+assign pr_i[5].b_addr = {5'd0, 10'd0}; assign pr_i[5].b_d = 8'd0; assign pr_i[5].b_we = 1'b0;
+assign zram2_D = pr_o[5].a_q;
 
-// Audio NMI (MAME porta_w / sound_nmi_gen): AY port A C0 = 4 per frame, E0 = 8 per frame, 00 = off; other values are
+// Audio NMI: AY port A C0 = 4 per frame, E0 = 8 per frame, 00 = off; other values are
 // ignored. 264 lines per frame -> every 66 / 33 lines.
 reg [7:0] z_sfreq = 8'd0;
 reg [6:0] z_slines = 7'd0;
@@ -356,13 +360,9 @@ end
 
 wire [7:0] ay_dout;
 wire [9:0] ay_sound;
-jt49_bus ay (
-	.rst_n(reset), .clk(clk_49m), .clk_en(cen_ay),
-	.bdir(cs2_ay_addr | cs2_ay_wr), .bc1(cs2_ay_addr | cs2_ay_rd),
-	.din(cpu2_Dout), .dout(ay_dout), .sel(1'b1),
-	.sound(ay_sound), .sample(), .A(), .B(), .C(),
-	.IOA_in(dip_sw[7:0]), .IOB_in(dip_sw[15:8]), .IOA_out(ay_ioa), .IOB_out()
-);
+assign ay_0_i.rst_n = reset; assign ay_0_i.ce = cen_ay; assign ay_0_i.bdir = cs2_ay_addr | cs2_ay_wr; assign ay_0_i.bc1 = cs2_ay_addr | cs2_ay_rd;
+assign ay_0_i.din = cpu2_Dout; assign ay_0_i.ioa_in = dip_sw[7:0]; assign ay_0_i.iob_in = dip_sw[15:8];
+assign ay_dout = ay_0_o.dout; assign ay_sound = ay_0_o.sound; assign ay_ioa = ay_0_o.ioa_out;
 // jt49 sound output is UNSIGNED 10-bit (see jt49.v). Zero-extend it into the
 // signed 16-bit output frame: sign-extending the MSB instead wraps at
 // mid-scale (ay_sound >= 512) and produces audible buzzing/static on loud notes.
@@ -385,40 +385,35 @@ end
 
 reg [12:0] fgtile_addr;
 wire [7:0] fgtile_D;
-eprom_8k fgtile_rom (.CLK(clk_49m), .ADDR(fgtile_addr), .CLK_DL(clk_49m),
-	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(fgtile_cs_i), .WR(ioctl_wr), .DATA(fgtile_D));
+assign fgtile_rom_a = fgtile_addr;
+assign fgtile_D = fgtile_rom_d;
 
-// BG tile ROMs — named by the layer they serve
-// Note: bg0_tilerom loads from bgtiles1 ROM region (CS_DL=bgtile1_cs_i)
-//       bg1_tilerom loads from bgtiles0 ROM region (CS_DL=bgtile0_cs_i)
-// This cross-mapping matches MAME's "4 - Which" gfx assignment.
+// BG tile ROMs, named by the layer they serve (load cross-mapping: rtl/vastar_dispatcher.sv)
 
 reg [12:0] bgtile0_addr;
 wire [7:0] bgtile0_D;
-eprom_8k bgtile_rom0 (.CLK(clk_49m), .ADDR(bgtile0_addr), .CLK_DL(clk_49m),
-	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(bgtile1_cs_i), .WR(ioctl_wr), .DATA(bgtile0_D));
+assign bgtile0_rom_a = bgtile0_addr;
+assign bgtile0_D = bgtile0_rom_d;
 
 reg [12:0] bgtile1_addr;
 wire [7:0] bgtile1_D;
-eprom_8k bgtile_rom1 (.CLK(clk_49m), .ADDR(bgtile1_addr), .CLK_DL(clk_49m),
-	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(bgtile0_cs_i), .WR(ioctl_wr), .DATA(bgtile1_D));
+assign bgtile1_rom_a = bgtile1_addr;
+assign bgtile1_D = bgtile1_rom_d;
 
 reg [12:0] sprite_addr;
 wire [7:0] sprite0_D, sprite1_D;
-eprom_8k sprite_rom0 (.CLK(clk_49m), .ADDR(sprite_addr), .CLK_DL(clk_49m),
-	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(sprite0_cs_i), .WR(ioctl_wr), .DATA(sprite0_D));
-eprom_8k sprite_rom1 (.CLK(clk_49m), .ADDR(sprite_addr), .CLK_DL(clk_49m),
-	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(sprite1_cs_i), .WR(ioctl_wr), .DATA(sprite1_D));
+assign sprite_rom_a = sprite_addr;
+assign sprite0_D = sprite0_rom_d;
+assign sprite1_D = sprite1_rom_d;
 
 wire [7:0] prom_r_D, prom_g_D, prom_b_D, prom_unk_D;
-eprom_256b prom_r_rom (.CLK(clk_49m), .ADDR(prom_addr), .CLK_DL(clk_49m),
-	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(prom_r_cs_i), .WR(ioctl_wr), .DATA(prom_r_D));
-eprom_256b prom_g_rom (.CLK(clk_49m), .ADDR(prom_addr), .CLK_DL(clk_49m),
-	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(prom_g_cs_i), .WR(ioctl_wr), .DATA(prom_g_D));
-eprom_256b prom_b_rom (.CLK(clk_49m), .ADDR(prom_addr), .CLK_DL(clk_49m),
-	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(prom_b_cs_i), .WR(ioctl_wr), .DATA(prom_b_D));
-eprom_256b prom_unk_rom (.CLK(clk_49m), .ADDR(8'd0), .CLK_DL(clk_49m),
-	.ADDR_DL(ioctl_addr), .DATA_IN(ioctl_data), .CS_DL(prom_unk_cs_i), .WR(ioctl_wr), .DATA(prom_unk_D));
+assign prom_r_D = prom_r_d;
+assign prom_g_D = prom_g_d;
+assign prom_b_D = prom_b_d;
+// UNKNOWN: tbp24s10.8n is read at a fixed address and its data is unused until its job is found (off colours reported,
+// esp. on CRT)
+assign prom_unk_a = 8'd0;
+assign prom_unk_D = prom_unk_d;
 
 //============================================= VIDEO RENDERING ==============================================//
 //
@@ -1140,7 +1135,7 @@ assign blue  = ovg ? ovg_b : {prom_b_D[3:0], prom_b_D[3]};
 //------------------------------------------------ Orca OVG-40c video board ---------------------------------------------------//
 
 // Same line timing and page flip as the Vastar renderer, so its output lines up with the same syncs. It draws
-// MAME's bitmap the other way round from the Vastar board (line v, column h rather than 255 - v / 255 - h):
+// the bitmap the other way round from the Vastar board (line v, column h rather than 255 - v / 255 - h):
 // Dog Fight is ROT270 where Vastar is ROT90, through the same CCW screen rotation. The Bounty (ROT180, horizontal)
 // uses the Vastar board's 255 - v / 255 - h with no screen rotation.
 Vastar_OVG40C ovg_pcb
@@ -1160,14 +1155,19 @@ Vastar_OVG40C ovg_pcb
 	.blank(hblk | vblk),
 	.flip(zod ? ~z_flip_d : ~mainlatch[1]),
 	.percuss(~zod | percuss),
-	.ioctl_addr(ioctl_addr),
-	.ioctl_data(ioctl_data),
-	.ioctl_wr(ioctl_wr),
-	.gfx_cs(ovg_gfx_cs_i),
-	.prom_cs(ovg_prom_cs_i),
 	.red(ovg_r),
 	.green(ovg_g),
-	.blue(ovg_b)
+	.blue(ovg_b),
+	.gfx_rom_a(ovg_gfx_a), .gfx_rom_d(ovg_gfx_d), .prom_a(ovg_prom_a), .prom_d(ovg_prom_d),
+	.obj_i(ovg_pr_i[0]), .fg_i(ovg_pr_i[1]), .bg_i(ovg_pr_i[2]), .lb_i(pr_i[6]),
+	.obj_o(pr_o[0]), .fg_o(pr_o[1]), .bg_o(pr_o[2]), .lb_o(pr_o[6])
 );
+
+// pooled CPU inputs and the colour PROM address, assigned after every signal they read is declared
+assign prom_a = prom_addr;
+assign z80_i[0].reset_n = reset; assign z80_i[0].ce = cen_cpu & ~pause; assign z80_i[0].int_n = ~z_irq; assign z80_i[0].nmi_n = ~cpu1_nmi;
+assign z80_i[0].di = cpu1_Din;
+assign z80_i[1].reset_n = reset & ~cpu2_rst; assign z80_i[1].ce = cen_cpu & ~pause; assign z80_i[1].int_n = ~(zod ? z_pend : cpu2_irq); assign z80_i[1].nmi_n = ~z_snmi;
+assign z80_i[1].di = cpu2_Din;
 
 endmodule
