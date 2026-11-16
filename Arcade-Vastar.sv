@@ -70,6 +70,12 @@ module emu
 	output        HDMI_BLACKOUT,
 	output        HDMI_BOB_DEINT,
 
+	input   [5:0] LFB_FMT,
+	input  [31:0] LFB_BASE,
+	input  [11:0] LFB_WIDTH,
+	input  [11:0] LFB_HEIGHT,
+	input  [13:0] LFB_STRIDE,
+
 `ifdef MISTER_FB
 	// Use framebuffer in DDRAM
 	// FB_FORMAT:
@@ -298,8 +304,12 @@ assign USER_OUT = USER_OUT_DRIVE;
 
 wire [1:0] ar = status[14:13];
 
-assign VIDEO_ARX = status[12] ? ((!ar) ? 12'd4 : (ar - 1'd1)) : ((!ar) ? 12'd3 : (ar - 1'd1));
-assign VIDEO_ARY = status[12] ? ((!ar) ? 12'd3 : 12'd0) : ((!ar) ? 12'd4 : 12'd0);
+reg [7:0] core_config = 8'd0;
+reg [4:0] in_map[24];
+wire horz = core_config[4];
+
+assign VIDEO_ARX = (status[12] | horz) ? ((!ar) ? 12'd4 : (ar - 1'd1)) : ((!ar) ? 12'd3 : (ar - 1'd1));
+assign VIDEO_ARY = (status[12] | horz) ? ((!ar) ? 12'd3 : 12'd0) : ((!ar) ? 12'd4 : 12'd0);
 
 `include "build_id.v"
 localparam CONF_STR = {
@@ -308,8 +318,7 @@ localparam CONF_STR = {
 	"P1ODE,Aspect Ratio,Original,Full screen,[ARC1],[ARC2];",
 	"P1OC,Orientation,Vert,Horz;",
 	"P1OB,HDMI Flip,Off,On;",
-	// CRT Flip disabled: toggling it has no effect on this core.
-	// "P1OM,CRT Flip,Off,On;",
+	"P1OM,CRT Flip,Off,On;",
 	"P1OFH,Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
 	"-;",
 	"H1OR,Autosave Hiscores,Off,On;",
@@ -398,8 +407,6 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	// [MiSTer-DB9-Pro END]
 );
 
-////////////////////   CLOCKS   ///////////////////
-
 wire CLK_49M;
 wire locked;
 
@@ -420,7 +427,6 @@ wire        cfg_write;
 wire  [5:0] cfg_address;
 wire [31:0] cfg_data;
 
-// PLL reconfig kept for potential future use
 pll_cfg pll_cfg
 (
 	.mgmt_clk(CLK_50M),
@@ -435,20 +441,12 @@ pll_cfg pll_cfg
 	.reconfig_from_pll(reconfig_from_pll)
 );
 
-// No PLL reconfiguration is used
 assign cfg_write = 0;
 assign cfg_address = 0;
 assign cfg_data = 0;
 
-// Hold both Z80s in reset until the PLL is locked and the ROM download has finished, so they never
-// execute against an unstable clock or partial ROM data.
 wire reset = RESET | status[0] | buttons[1] | ioctl_download | ~locked;
 
-// Async-assert / sync-deassert reset synchronizer. Raw `reset` above is a combinational OR of
-// async terms (HPS reset/download, PLL ~locked), but it feeds CPUs running on CLK_49M. Releasing
-// it unsynchronized lets the CPU catch the
-// deassert at a random CLK_49M phase each boot, causing intermittent bad boots. Registering
-// the release onto CLK_49M gives a clean, deterministic edge instead.
 reg [1:0] rst_sync = 2'b11;
 always @(posedge CLK_49M or posedge reset) begin
 	if (reset) rst_sync <= 2'b11;
@@ -456,48 +454,24 @@ always @(posedge CLK_49M or posedge reset) begin
 end
 wire reset_sync = rst_sync[1];
 
-///////////////////         Keyboard           //////////////////
+wire        pause_cpu;
+wire [12:0] kb;
+/* verilator lint_off PINCONNECTEMPTY */
+ctl_keyboard keyboard(.clk(CLK_49M), .ps2_key(ps2_key), .pause(pause_cpu), .kb(kb), .kbx());
+/* verilator lint_on PINCONNECTEMPTY */
+wire btn_up       = kb[0];
+wire btn_down     = kb[1];
+wire btn_left     = kb[2];
+wire btn_right    = kb[3];
+wire btn_fire     = kb[4];
+wire btn_fire2    = kb[5];
+wire btn_1p_start = kb[6];
+wire btn_2p_start = kb[7];
+wire btn_coin1    = kb[8];
+wire btn_coin2    = kb[9];
+wire btn_service  = kb[10];
+wire btn_pause    = kb[12];
 
-reg btn_up       = 0;
-reg btn_down     = 0;
-reg btn_left     = 0;
-reg btn_right    = 0;
-reg btn_fire     = 0;
-reg btn_fire2    = 0;
-reg btn_coin1    = 0;
-reg btn_coin2    = 0;
-reg btn_1p_start = 0;
-reg btn_2p_start = 0;
-reg btn_pause    = 0;
-reg btn_service  = 0;
-
-wire pressed = ps2_key[9];
-wire [7:0] code = ps2_key[7:0];
-always @(posedge CLK_49M) begin
-	reg old_state;
-	old_state <= ps2_key[10];
-	if(old_state != ps2_key[10]) begin
-		case(code)
-			'h16: btn_1p_start <= pressed; // 1
-			'h1E: btn_2p_start <= pressed; // 2
-			'h2E: btn_coin1    <= pressed; // 5
-			'h36: btn_coin2    <= pressed; // 6
-			'h46: btn_service  <= pressed; // 9
-			'h4D: btn_pause    <= pressed; // P
-
-			'h75: btn_up      <= pressed; // up
-			'h72: btn_down    <= pressed; // down
-			'h6B: btn_left    <= pressed; // left
-			'h74: btn_right   <= pressed; // right
-			'h14: btn_fire    <= pressed; // ctrl
-			'h11: btn_fire2   <= pressed; // alt
-		endcase
-	end
-end
-
-//////////////////  Arcade Buttons/Interfaces   ///////////////////////////
-
-//Player 1
 wire m_up1      = btn_up      | joystick_0[1];
 wire m_down1    = btn_down    | joystick_0[0];
 wire m_left1    = btn_left    | joystick_0[3];
@@ -505,7 +479,6 @@ wire m_right1   = btn_right   | joystick_0[2];
 wire m_fire1    = btn_fire    | joystick_0[4];
 wire m_fire1b   = btn_fire2   | joystick_0[5];
 
-//Player 2
 wire m_up2      = btn_up      | joystick_1[1];
 wire m_down2    = btn_down    | joystick_1[0];
 wire m_left2    = btn_left    | joystick_1[3];
@@ -513,15 +486,30 @@ wire m_right2   = btn_right   | joystick_1[2];
 wire m_fire2    = btn_fire    | joystick_1[4];
 wire m_fire2b   = btn_fire2   | joystick_0[5];
 
-//Start/coin
 wire m_start1   = btn_1p_start | joystick_0[6];
 wire m_start2   = btn_2p_start | joystick_0[7];
 wire m_coin1    = btn_coin1    | joystick_0[8];
 wire m_coin2    = btn_coin2;
 wire m_pause    = btn_pause    | joystick_0[9];
 
-// PAUSE SYSTEM
-wire pause_cpu;
+wire [31:0] ctl = {
+	10'd0,
+	btn_service,
+	m_start2, m_start1, m_coin2, m_coin1,
+	2'd0, joystick_1[5], joystick_1[4],
+	joystick_1[0], joystick_1[1], joystick_1[2], joystick_1[3],
+	2'd0, m_fire1b, m_fire1,
+	m_down1, m_up1, m_right1, m_left1,
+	1'b0
+};
+wire [7:0] zin0, zin1, zin2;
+genvar zb;
+generate for (zb = 0; zb < 8; zb = zb + 1) begin : zinmap
+	assign zin0[zb] = ctl[in_map[zb]];
+	assign zin1[zb] = ctl[in_map[zb + 8]];
+	assign zin2[zb] = ctl[in_map[zb + 16]];
+end endgenerate
+
 wire [23:0] rgb_out;
 pause #(8,8,8,49) pause
 (
@@ -532,30 +520,30 @@ pause #(8,8,8,49) pause
 	.options(~status[26:25])
 );
 
-// DIP SWITCHES
-reg [7:0] dip_sw[8];	// Active-LOW
+reg [7:0] dip_sw[8];
 always @(posedge CLK_49M) begin
 	if(ioctl_wr && (ioctl_index==254) && !ioctl_addr[24:3])
 		dip_sw[ioctl_addr[2:0]] <= ioctl_dout;
 end
 
-// Variant select byte, loaded from the MRA's rom index="1" (see releases/*.mra).
-// bit0: 0 = Vastar (rotate CW), 1 = Planet Probe (rotate CCW).
-reg [7:0] core_config = 8'd0;
 always_ff @(posedge CLK_49M) begin
-    if (ioctl_wr && ioctl_index == 8'd1)
+    if (ioctl_wr && ioctl_index == 8'd1 && ioctl_addr == 25'd0) begin
         core_config <= ioctl_dout;
+        for (int i = 0; i < 24; i++) in_map[i] <= 5'd0;
+    end
+    if (ioctl_wr && ioctl_index == 8'd1 && ioctl_addr >= 25'd1 && ioctl_addr <= 25'd24)
+        in_map[ioctl_addr[4:0] - 5'd1] <= ioctl_dout[4:0];
 end
 
 wire rot_flip = core_config[0];
-
-///////////////                 Video                  ////////////////
+wire ovg      = core_config[1];
+wire zod      = core_config[2];
+wire percuss  = core_config[3];
 
 wire hblank, vblank;
 wire hs, vs;
 wire [4:0] r_out, g_out, b_out;
 
-// Scale 5-bit color to 8-bit for VGA output
 wire [7:0] r = (r_out[0] ? 8'h19 : 8'h00) + 
                (r_out[1] ? 8'h24 : 8'h00) + 
                (r_out[2] ? 8'h35 : 8'h00) +
@@ -574,7 +562,7 @@ wire [7:0] b = (b_out[0] ? 8'h19 : 8'h00) +
 wire ce_pix;
 
 wire rotate_ccw = rot_flip ? 0 : 1;
-wire no_rotate = status[12] | direct_video;
+wire no_rotate = status[12] | direct_video | horz;
 wire flip = ~no_rotate ^ status[11];
 wire video_rotated;
 screen_rotate screen_rotate(.*);
@@ -594,15 +582,11 @@ arcade_video #(256, 24) arcade_video
 	.fx(status[17:15])
 );
 
-// Assemble player control bytes for Vastar (active HIGH)
-// p1/p2: {2'b00, btn2, btn1, right, left, down, up}
-// sys:   {2'b00, service, start2, start1, 1'b0, coin2, coin1}
 wire [7:0] p1_controls  = {2'b00, m_fire1b, m_fire1, m_right1, m_left1, m_down1, m_up1};
 wire [7:0] p2_controls  = {2'b00, m_fire2b, m_fire2, m_right2, m_left2, m_down2, m_up2};
 wire [7:0] sys_controls = {2'b00, btn_service, m_start2, m_start1, 1'b0, m_coin2, m_coin1};
 
-// Instantiate Vastar top-level module
-Vastar vastar_inst
+vastar_dispatcher vastar_inst
 (
 	.reset(~reset_sync),
 
@@ -615,6 +599,13 @@ Vastar vastar_inst
 	.dip_sw({dip_sw[1], dip_sw[0]}),
 
     .rot_flip(rot_flip),
+	.ovg(ovg),
+	.zod(zod),
+	.zin0(zin0),
+	.zin1(zin1),
+	.zin2(zin2),
+	.percuss(percuss),
+	.horz(horz),
 	.crt_flip(status[22]),
 
 	.h_center(status[6:3]),
@@ -645,8 +636,6 @@ Vastar vastar_inst
 	.hs_write(hs_write_enable)
 );
 
-// HISCORE SYSTEM
-// --------------
 wire [15:0]hs_address;
 wire [7:0] hs_data_in;
 wire [7:0] hs_data_out;
