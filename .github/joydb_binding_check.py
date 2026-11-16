@@ -17,12 +17,12 @@
 # non-ported / pristine upstream) is n/a -- there is no "legitimately
 # missing port" case (unlike satgate's InputTest 1'b1 tie), so this GATES.
 #
-# EXCEPTION -- OPTIONAL_PORTS (below): two canonical ports are excused. They
+# EXCEPTION -- OPTIONAL_PORTS (below): three canonical ports are excused. They
 # are ADVISORY OUTPUTS the WRAPPER_BLOCK deliberately does NOT emit (commit
-# a79778f) -- an unconnected output is harmless in Verilog (no silently-dead
-# path). The remap_default_* inputs are NOT excused: unbound, Quartus grounds
-# them, every DB9 button slot reads NONE and DB15/DB9MD face buttons go dead
-# on a stock MiSTer binary.
+# a79778f; mt32_present is bound by hand on MT32 cores only) -- an unconnected
+# output is harmless in Verilog (no silently-dead path). The remap_default_*
+# inputs are NOT excused: unbound, Quartus grounds them, every DB9 button slot
+# reads NONE and DB15/DB9MD face buttons go dead on a stock MiSTer binary.
 #
 # Also FATAL: the hps_io `.joy_raw` bound to an `OSD_STATUS ? ...` ternary.
 # Main_MiSTer needs DB9 button edges during gameplay for its idle timers
@@ -74,9 +74,33 @@ _CONN_RE = re.compile(r"\.\s*([A-Za-z_]\w*)\s*\(")
 # unconnected (commit a79778f). Unlike an unbound INPUT (controller path goes
 # silently dead), an unconnected OUTPUT is harmless in Verilog, so it must not
 # FATAL the binding completeness guard.
-OPTIONAL_OUTPUTS = {"pad_1_6btn", "pad_2_6btn"}
+OPTIONAL_OUTPUTS = {"pad_1_6btn", "pad_2_6btn", "mt32_present"}
 OPTIONAL_PORTS = OPTIONAL_OUTPUTS
 _GATED_JOY_RAW_RE = re.compile(r"\.\s*joy_raw\s*\(\s*OSD_STATUS\s*\?")
+
+# Layer B slice width. Main_MiSTer maps one DB9 button per declared label
+# (CONF_STR J1/J, or the MRA <buttons names=...> on arcade cores) starting at
+# bit 4, up to slot 12. A `joydb_N_mapped[H:0]` cut below that drops the top
+# buttons (Start/Coin/Pause/Service) on a DB9 pad while the Define page still
+# shows them mapped. Same rule as port_core_full.py mapped_top_bit().
+_J_RE = re.compile(r'"J1?,([^"]*)"')
+_MAPPED_RE = re.compile(r"joydb_[12]_mapped\[(\d+):0\]")
+_MRA_BUTTONS_RE = re.compile(r'<buttons[^>]*\bnames="([^"]*)"')
+
+
+def mapped_top_bit(text, core_dir):
+    m = _J_RE.search(text)
+    n = len(m.group(1).rstrip(";").split(",")) if m else 0
+    for root, _, files in os.walk(os.path.join(core_dir, "releases")):
+        for f in files:
+            if f.endswith(".mra"):
+                try:
+                    s = open(os.path.join(root, f), errors="replace").read()
+                except OSError:
+                    continue
+                for names in _MRA_BUTTONS_RE.findall(s):
+                    n = max(n, len(names.split(",")))
+    return min(12, 3 + n)
 
 
 def required_ports(core_dir=None):
@@ -180,6 +204,13 @@ def check_sv(core_dir, core_sv, req):
               f"DB9 play cannot reset hdmi_off / CEC sleep; bind "
               f".joy_raw(joy_raw_payload)  [{cb}]")
         rc = 1
+    his = [int(h) for h in _MAPPED_RE.findall(text)]
+    if his:
+        top = mapped_top_bit(text, core_dir)
+        if min(his) < top:
+            print(f"  joydb-bind: FAIL joydb_*_mapped[{min(his)}:0] narrower "
+                  f"than the declared buttons; widen to [{top}:0]  [{cb}]")
+            rc = 1
     if rc:
         return rc
     # Don't claim "all N bound" — an unbound OPTIONAL output passes the gate but
